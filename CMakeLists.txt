@@ -11,3 +11,12 @@ add_executable(gpt2
 )
 
 target_include_directories(gpt2 PRIVATE include)
+
+include(CTest)
+
+if(BUILD_TESTING)
+    add_test(NAME cli_smoke COMMAND gpt2)
+    set_tests_properties(cli_smoke PROPERTIES
+        PASS_REGULAR_EXPRESSION "GPT-2 CPP inference engine"
+    )
+endif()
