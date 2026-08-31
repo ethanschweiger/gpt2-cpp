@@ -1,0 +1,26 @@
+# CMake build directories
+/build/
+/build-*/
+/cmake-build-*/
+
+# Compiler artifacts
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+
+# Python tooling
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Downloaded model files
+/models/
+/checkpoints/
+
+# Editor and operating-system files
+.DS_Store
+.idea/
+.vscode/
