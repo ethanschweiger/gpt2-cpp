@@ -38,6 +38,7 @@ endfunction()
 
 add_library(gpt2_core STATIC
     src/tensor.cpp
+    src/tensor_ops.cpp
 )
 
 target_include_directories(gpt2_core PUBLIC include)
@@ -62,6 +63,16 @@ if(BUILD_TESTING)
 
     add_test(NAME tensor_unit COMMAND gpt2_tensor_tests)
     set_tests_properties(tensor_unit PROPERTIES LABELS unit)
+
+    add_executable(gpt2_tensor_ops_tests
+        tests/tensor_ops_test.cpp
+    )
+
+    target_link_libraries(gpt2_tensor_ops_tests PRIVATE gpt2_core)
+    gpt2_enable_warnings(gpt2_tensor_ops_tests)
+
+    add_test(NAME tensor_ops_unit COMMAND gpt2_tensor_ops_tests)
+    set_tests_properties(tensor_ops_unit PROPERTIES LABELS unit)
 
     add_test(NAME cli_smoke COMMAND gpt2)
     set_tests_properties(cli_smoke PROPERTIES
