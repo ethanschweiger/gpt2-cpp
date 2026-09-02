@@ -54,6 +54,8 @@ gpt2_enable_warnings(gpt2)
 include(CTest)
 
 if(BUILD_TESTING)
+    find_package(Python3 3.9 COMPONENTS Interpreter REQUIRED)
+
     add_executable(gpt2_tensor_tests
         tests/tensor_test.cpp
     )
@@ -73,6 +75,17 @@ if(BUILD_TESTING)
 
     add_test(NAME tensor_ops_unit COMMAND gpt2_tensor_ops_tests)
     set_tests_properties(tensor_ops_unit PROPERTIES LABELS unit)
+
+    add_test(
+        NAME checkpoint_writer_unit
+        COMMAND
+            "${Python3_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/tests/checkpoint_writer_test.py"
+    )
+    set_tests_properties(checkpoint_writer_unit PROPERTIES
+        LABELS unit
+        ENVIRONMENT "PYTHONPATH=${PROJECT_SOURCE_DIR}/tools"
+    )
 
     add_test(NAME cli_smoke COMMAND gpt2)
     set_tests_properties(cli_smoke PROPERTIES
