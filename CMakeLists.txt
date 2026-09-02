@@ -6,17 +6,66 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+option(GPT2_WARNINGS_AS_ERRORS
+    "Treat compiler warnings as errors"
+    OFF
+)
+
+function(gpt2_enable_warnings target_name)
+    if(MSVC)
+        target_compile_options(${target_name} PRIVATE
+            /W4
+            /permissive-
+        )
+
+        if(GPT2_WARNINGS_AS_ERRORS)
+            target_compile_options(${target_name} PRIVATE /WX)
+        endif()
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "^(AppleClang|Clang|GNU)$")
+        target_compile_options(${target_name} PRIVATE
+            -Wall
+            -Wextra
+            -Wpedantic
+            -Wconversion
+            -Wsign-conversion
+        )
+
+        if(GPT2_WARNINGS_AS_ERRORS)
+            target_compile_options(${target_name} PRIVATE -Werror)
+        endif()
+    endif()
+endfunction()
+
+add_library(gpt2_core STATIC
+    src/tensor.cpp
+)
+
+target_include_directories(gpt2_core PUBLIC include)
+gpt2_enable_warnings(gpt2_core)
+
 add_executable(gpt2
     src/main.cpp
 )
 
-target_include_directories(gpt2 PRIVATE include)
+target_link_libraries(gpt2 PRIVATE gpt2_core)
+gpt2_enable_warnings(gpt2)
 
 include(CTest)
 
 if(BUILD_TESTING)
+    add_executable(gpt2_tensor_tests
+        tests/tensor_test.cpp
+    )
+
+    target_link_libraries(gpt2_tensor_tests PRIVATE gpt2_core)
+    gpt2_enable_warnings(gpt2_tensor_tests)
+
+    add_test(NAME tensor_unit COMMAND gpt2_tensor_tests)
+    set_tests_properties(tensor_unit PROPERTIES LABELS unit)
+
     add_test(NAME cli_smoke COMMAND gpt2)
     set_tests_properties(cli_smoke PROPERTIES
+        LABELS smoke
         PASS_REGULAR_EXPRESSION "GPT-2 CPP inference engine"
     )
 endif()
