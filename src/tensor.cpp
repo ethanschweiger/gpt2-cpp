@@ -65,6 +65,18 @@ const Tensor::Shape& Tensor::shape() const {
     return shape_m;
 }
 
+void Tensor::reshape(Shape new_shape) {
+    const std::size_t new_element_count = checked_numel(new_shape);
+
+    if (new_element_count != numel()) {
+        throw std::invalid_argument(
+            "cannot reshape tensor to a different element count"
+        );
+    }
+
+    shape_m = std::move(new_shape);
+}
+
 float* Tensor::data() {
     return data_m.data();
 }

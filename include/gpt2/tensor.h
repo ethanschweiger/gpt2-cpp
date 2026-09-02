@@ -17,6 +17,8 @@ public:
     std::size_t numel() const;
     const Shape& shape() const;
 
+    void reshape(Shape new_shape);
+
     float* data();
     const float* data() const;
 

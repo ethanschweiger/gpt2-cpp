@@ -98,6 +98,78 @@ void test_indexing_and_mutation() {
     expect(cube.at(cube_index) == 23.0F, "3D indexing is row-major");
 }
 
+void test_reshape() {
+    gpt2::Tensor tensor(
+        {2, 3},
+        std::vector<float>{0.0F, 1.0F, 2.0F, 3.0F, 4.0F, 5.0F}
+    );
+    const float* original_data = tensor.data();
+
+    tensor.reshape({3, 2});
+
+    expect(
+        tensor.shape() == gpt2::Tensor::Shape{3, 2},
+        "reshape updates the shape"
+    );
+    expect(tensor.rank() == 2, "reshape reports the updated rank");
+    expect(tensor.numel() == 6, "reshape preserves the element count");
+    expect(tensor.data() == original_data, "reshape keeps the same data buffer");
+
+    for (std::size_t index = 0; index < tensor.numel(); ++index) {
+        expect(
+            tensor.at(index) == static_cast<float>(index),
+            "reshape preserves flat data"
+        );
+    }
+
+    const std::array<std::size_t, 2> new_coordinates{2, 0};
+    expect(
+        tensor.at(new_coordinates) == 4.0F,
+        "coordinate indexing uses the reshaped dimensions"
+    );
+
+    tensor.reshape({1, 2, 3});
+    expect(tensor.rank() == 3, "reshape can change the tensor rank");
+}
+
+void test_invalid_reshape() {
+    gpt2::Tensor tensor({2, 3});
+
+    expect_throws<std::invalid_argument>(
+        [&tensor] { tensor.reshape({4, 2}); },
+        "reshape rejects a different element count"
+    );
+    expect(
+        tensor.shape() == gpt2::Tensor::Shape{2, 3},
+        "failed reshape preserves the original shape"
+    );
+
+    expect_throws<std::invalid_argument>(
+        [&tensor] { tensor.reshape(gpt2::Tensor::Shape{}); },
+        "reshape rejects an empty shape"
+    );
+
+    expect_throws<std::invalid_argument>(
+        [&tensor] { tensor.reshape({2, 0, 3}); },
+        "reshape rejects a zero-sized dimension"
+    );
+
+    expect_throws<std::overflow_error>(
+        [&tensor] {
+            tensor.reshape({
+                std::numeric_limits<std::size_t>::max(),
+                2
+            });
+        },
+        "reshape rejects element-count overflow"
+    );
+
+    expect(
+        tensor.shape() == gpt2::Tensor::Shape{2, 3},
+        "invalid reshape attempts do not modify the tensor"
+    );
+}
+
 void test_invalid_construction() {
     expect_throws<std::invalid_argument>(
         [] {
@@ -168,6 +240,8 @@ void test_invalid_indexing() {
 int main() {
     test_construction();
     test_indexing_and_mutation();
+    test_reshape();
+    test_invalid_reshape();
     test_invalid_construction();
     test_invalid_indexing();
 
