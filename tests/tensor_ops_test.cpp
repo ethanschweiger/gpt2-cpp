@@ -104,12 +104,110 @@ void test_shape_mismatch() {
     );
 }
 
+void test_matrix_multiplication() {
+    const gpt2::Tensor left(
+        {2, 3},
+        std::vector<float>{1.0F, 2.0F, 3.0F, 4.0F, 5.0F, 6.0F}
+    );
+    const gpt2::Tensor right(
+        {3, 2},
+        std::vector<float>{7.0F, 8.0F, 9.0F, 10.0F, 11.0F, 12.0F}
+    );
+
+    const gpt2::Tensor result = gpt2::matmul(left, right);
+
+    expect(
+        result.shape() == gpt2::Tensor::Shape{2, 2},
+        "matrix multiplication produces the expected shape"
+    );
+    expect(result.at(0) == 58.0F, "matrix result at row 0 column 0 is correct");
+    expect(result.at(1) == 64.0F, "matrix result at row 0 column 1 is correct");
+    expect(result.at(2) == 139.0F, "matrix result at row 1 column 0 is correct");
+    expect(result.at(3) == 154.0F, "matrix result at row 1 column 1 is correct");
+
+    expect(left.at(0) == 1.0F, "matmul leaves the left input unchanged");
+    expect(right.at(5) == 12.0F, "matmul leaves the right input unchanged");
+}
+
+void test_matrix_by_column_vector() {
+    const gpt2::Tensor matrix(
+        {2, 3},
+        std::vector<float>{1.0F, 2.0F, 3.0F, 4.0F, 5.0F, 6.0F}
+    );
+    const gpt2::Tensor column(
+        {3, 1},
+        std::vector<float>{1.0F, 2.0F, 3.0F}
+    );
+
+    const gpt2::Tensor result = gpt2::matmul(matrix, column);
+
+    expect(
+        result.shape() == gpt2::Tensor::Shape{2, 1},
+        "matrix-by-column-vector produces the expected shape"
+    );
+    expect(result.at(0) == 14.0F, "first matrix-vector result is correct");
+    expect(result.at(1) == 32.0F, "second matrix-vector result is correct");
+}
+
+void test_identity_matrix_multiplication() {
+    const gpt2::Tensor matrix(
+        {2, 2},
+        std::vector<float>{-1.0F, 2.5F, 3.0F, 4.0F}
+    );
+    const gpt2::Tensor identity(
+        {2, 2},
+        std::vector<float>{1.0F, 0.0F, 0.0F, 1.0F}
+    );
+
+    const gpt2::Tensor result = gpt2::matmul(matrix, identity);
+
+    for (std::size_t index = 0; index < matrix.numel(); ++index) {
+        expect(
+            result.at(index) == matrix.at(index),
+            "multiplication by the identity matrix preserves values"
+        );
+    }
+}
+
+void test_invalid_matrix_multiplication() {
+    expect_throws<std::invalid_argument>(
+        [] {
+            const gpt2::Tensor left({3});
+            const gpt2::Tensor right({3, 1});
+            static_cast<void>(gpt2::matmul(left, right));
+        },
+        "matmul rejects a left operand that is not rank 2"
+    );
+
+    expect_throws<std::invalid_argument>(
+        [] {
+            const gpt2::Tensor left({1, 2});
+            const gpt2::Tensor right({2, 1, 1});
+            static_cast<void>(gpt2::matmul(left, right));
+        },
+        "matmul rejects a right operand that is not rank 2"
+    );
+
+    expect_throws<std::invalid_argument>(
+        [] {
+            const gpt2::Tensor left({2, 3});
+            const gpt2::Tensor right({2, 2});
+            static_cast<void>(gpt2::matmul(left, right));
+        },
+        "matmul rejects incompatible inner dimensions"
+    );
+}
+
 }  // namespace
 
 int main() {
     test_one_dimensional_addition();
     test_two_dimensional_addition();
     test_shape_mismatch();
+    test_matrix_multiplication();
+    test_matrix_by_column_vector();
+    test_identity_matrix_multiplication();
+    test_invalid_matrix_multiplication();
 
     if (failure_count != 0) {
         std::cerr << failure_count << " tensor operation test(s) failed\n";

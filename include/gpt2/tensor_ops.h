@@ -5,5 +5,6 @@
 namespace gpt2 {
 
 Tensor add(const Tensor& left, const Tensor& right);
+Tensor matmul(const Tensor& left, const Tensor& right);
 
 }  // namespace gpt2
