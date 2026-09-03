@@ -73,6 +73,7 @@ quantization metadata and additional data-type codes.
 A valid version 1 checkpoint satisfies all of these conditions:
 
 - The tensor count exactly matches the number of records.
+- All five model-configuration values are greater than zero.
 - Every tensor name is non-empty and unique.
 - Every rank and dimension is greater than zero.
 - The element count equals the product of all dimensions.
@@ -84,6 +85,20 @@ A valid version 1 checkpoint satisfies all of these conditions:
 
 Readers must reject unsupported versions, data types, invalid metadata,
 arithmetic overflow, truncated data, duplicate tensor names, and trailing data.
+
+## C++ loader resource limits
+
+The reference C++ loader applies defensive limits before allocating memory:
+
+- At most 4,096 tensor records.
+- At most 8 dimensions per tensor.
+- At most 1,024 UTF-8 bytes per tensor name.
+- At most 512 MiB of payload data per tensor.
+- At most 8 GiB of payload data across the checkpoint.
+
+These limits comfortably cover the GPT-2 model family while preventing a
+malformed or sparse file from requesting allocations based only on extreme
+metadata values.
 
 ## Portability rule
 
