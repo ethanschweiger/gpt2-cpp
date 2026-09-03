@@ -43,6 +43,7 @@ endfunction()
 
 add_library(gpt2_core STATIC
     src/checkpoint.cpp
+    src/layers.cpp
     src/tensor.cpp
     src/tensor_ops.cpp
 )
@@ -91,6 +92,16 @@ if(BUILD_TESTING)
 
     add_test(NAME checkpoint_unit COMMAND gpt2_checkpoint_tests)
     set_tests_properties(checkpoint_unit PROPERTIES LABELS unit)
+
+    add_executable(gpt2_layers_tests
+        tests/layers_test.cpp
+    )
+
+    target_link_libraries(gpt2_layers_tests PRIVATE gpt2_core)
+    gpt2_enable_warnings(gpt2_layers_tests)
+
+    add_test(NAME layers_unit COMMAND gpt2_layers_tests)
+    set_tests_properties(layers_unit PROPERTIES LABELS unit)
 
     add_test(
         NAME checkpoint_writer_unit
