@@ -137,4 +137,33 @@ Tensor layer_norm(
     return result;
 }
 
+Tensor gelu(const Tensor& input) {
+    constexpr float square_root_two_over_pi =
+        0.7978845608028654F;
+    constexpr float cubic_coefficient =
+        0.044715F;
+
+    Tensor result(input.shape());
+
+    const float* input_data = input.data();
+    float* result_data = result.data();
+
+    for (std::size_t index = 0;
+         index < input.numel();
+         ++index) {
+        const float value = input_data[index];
+        const float value_cubed =
+            value * value * value;
+
+        result_data[index] =
+            0.5F * value *
+            (1.0F + std::tanh(
+                square_root_two_over_pi *
+                (value + cubic_coefficient * value_cubed)
+            ));
+    }
+
+    return result;
+}
+
 }  // namespace gpt2

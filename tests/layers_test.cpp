@@ -325,6 +325,74 @@ void test_invalid_layer_norm_epsilon() {
     );
 }
 
+void test_gelu_known_values() {
+    const gpt2::Tensor input(
+        {1, 5},
+        std::vector<float>{-2.0F, -1.0F, 0.0F, 1.0F, 2.0F}
+    );
+
+    const gpt2::Tensor result = gpt2::gelu(input);
+
+    const std::array<float, 5> expected{
+        -0.0454023F,
+        -0.158808F,
+        0.0F,
+        0.841192F,
+        1.9546F,
+    };
+
+    expect(
+        result.shape() == input.shape(),
+        "GELU preserves the input shape"
+    );
+
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+        expect_near(
+            result.at(index),
+            expected[index],
+            1.0e-5F,
+            "GELU produces the expected value"
+        );
+    }
+
+    expect(input.at(0) == -2.0F, "GELU leaves its input unchanged");
+}
+
+void test_gelu_multidimensional_tensor() {
+    const gpt2::Tensor input(
+        {2, 2, 2},
+        std::vector<float>{
+            -2.0F, -1.0F, 0.0F, 1.0F,
+            2.0F, -0.5F, 0.5F, 3.0F,
+        }
+    );
+
+    const gpt2::Tensor result = gpt2::gelu(input);
+
+    expect(
+        result.shape() == gpt2::Tensor::Shape{2, 2, 2},
+        "GELU preserves a multidimensional shape"
+    );
+    expect_near(
+        result.at(5),
+        -0.154286F,
+        1.0e-5F,
+        "GELU processes a negative value in a multidimensional tensor"
+    );
+    expect_near(
+        result.at(6),
+        0.345714F,
+        1.0e-5F,
+        "GELU processes a positive value in a multidimensional tensor"
+    );
+    expect_near(
+        result.at(7),
+        2.99636F,
+        1.0e-5F,
+        "GELU processes every element in a multidimensional tensor"
+    );
+}
+
 }  // namespace
 
 int main() {
@@ -337,6 +405,8 @@ int main() {
     test_layer_norm_constant_row();
     test_invalid_layer_norm_parameters();
     test_invalid_layer_norm_epsilon();
+    test_gelu_known_values();
+    test_gelu_multidimensional_tensor();
 
     if (failure_count != 0) {
         std::cerr << failure_count << " test assertion(s) failed\n";
