@@ -54,7 +54,7 @@ gpt2_enable_warnings(gpt2)
 include(CTest)
 
 if(BUILD_TESTING)
-    find_package(Python3 3.9 COMPONENTS Interpreter REQUIRED)
+    find_package(Python3 3.10 COMPONENTS Interpreter REQUIRED)
 
     add_executable(gpt2_tensor_tests
         tests/tensor_test.cpp
@@ -83,6 +83,17 @@ if(BUILD_TESTING)
             "${PROJECT_SOURCE_DIR}/tests/checkpoint_writer_test.py"
     )
     set_tests_properties(checkpoint_writer_unit PROPERTIES
+        LABELS unit
+        ENVIRONMENT "PYTHONPATH=${PROJECT_SOURCE_DIR}/tools"
+    )
+
+    add_test(
+        NAME gpt2_exporter_unit
+        COMMAND
+            "${Python3_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/tests/export_gpt2_test.py"
+    )
+    set_tests_properties(gpt2_exporter_unit PROPERTIES
         LABELS unit
         ENVIRONMENT "PYTHONPATH=${PROJECT_SOURCE_DIR}/tools"
     )
