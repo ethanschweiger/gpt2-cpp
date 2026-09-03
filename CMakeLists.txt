@@ -11,6 +11,11 @@ option(GPT2_WARNINGS_AS_ERRORS
     OFF
 )
 
+option(GPT2_ENABLE_HF_TESTS
+    "Enable offline Hugging Face integration tests"
+    OFF
+)
+
 function(gpt2_enable_warnings target_name)
     if(MSVC)
         target_compile_options(${target_name} PRIVATE
@@ -97,6 +102,37 @@ if(BUILD_TESTING)
         LABELS unit
         ENVIRONMENT "PYTHONPATH=${PROJECT_SOURCE_DIR}/tools"
     )
+
+    if(GPT2_ENABLE_HF_TESTS)
+        execute_process(
+            COMMAND
+                "${Python3_EXECUTABLE}"
+                "-c"
+                "import numpy, torch, transformers; from transformers import GPT2Config, GPT2LMHeadModel"
+            RESULT_VARIABLE GPT2_HF_IMPORT_RESULT
+            ERROR_VARIABLE GPT2_HF_IMPORT_ERROR
+            OUTPUT_QUIET
+        )
+
+        if(NOT GPT2_HF_IMPORT_RESULT EQUAL 0)
+            message(FATAL_ERROR
+                "GPT2_ENABLE_HF_TESTS requires packages from "
+                "requirements-export.txt:\n${GPT2_HF_IMPORT_ERROR}"
+            )
+        endif()
+
+        add_test(
+            NAME gpt2_hf_exporter_integration
+            COMMAND
+                "${Python3_EXECUTABLE}"
+                "${PROJECT_SOURCE_DIR}/tests/hf_export_integration_test.py"
+        )
+        set_tests_properties(gpt2_hf_exporter_integration PROPERTIES
+            LABELS "integration;huggingface"
+            ENVIRONMENT
+                "PYTHONPATH=${PROJECT_SOURCE_DIR}/tools;HF_HUB_OFFLINE=1;TRANSFORMERS_OFFLINE=1"
+        )
+    endif()
 
     add_test(NAME cli_smoke COMMAND gpt2)
     set_tests_properties(cli_smoke PROPERTIES
