@@ -1,6 +1,7 @@
 #include "gpt2/layers.h"
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 
 namespace gpt2 {
@@ -48,6 +49,89 @@ Tensor embedding_lookup(
             result_data + token_index * embedding_size;
 
         std::copy_n(source, embedding_size, destination);
+    }
+
+    return result;
+}
+
+Tensor layer_norm(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor& bias,
+    float epsilon
+) {
+    if (weight.rank() != 1 || bias.rank() != 1) {
+        throw std::invalid_argument(
+            "layer norm weight and bias must be rank-1 tensors"
+        );
+    }
+
+    const std::size_t feature_count = input.shape().back();
+
+    if (weight.numel() != feature_count ||
+        bias.numel() != feature_count) {
+        throw std::invalid_argument(
+            "layer norm parameters must match the input's final dimension"
+        );
+    }
+
+    if (!std::isfinite(epsilon) || epsilon <= 0.0F) {
+        throw std::invalid_argument(
+            "layer norm epsilon must be finite and positive"
+        );
+    }
+
+    Tensor result(input.shape());
+
+    const float* input_data = input.data();
+    const float* weight_data = weight.data();
+    const float* bias_data = bias.data();
+    float* result_data = result.data();
+
+    const std::size_t row_count =
+        input.numel() / feature_count;
+
+    for (std::size_t row = 0; row < row_count; ++row) {
+        const std::size_t row_start = row * feature_count;
+
+        float mean = 0.0F;
+
+        for (std::size_t feature = 0;
+             feature < feature_count;
+             ++feature) {
+            mean += input_data[row_start + feature];
+        }
+
+        mean /= static_cast<float>(feature_count);
+
+        float variance = 0.0F;
+
+        for (std::size_t feature = 0;
+             feature < feature_count;
+             ++feature) {
+            const float difference =
+                input_data[row_start + feature] - mean;
+
+            variance += difference * difference;
+        }
+
+        variance /= static_cast<float>(feature_count);
+
+        const float inverse_standard_deviation =
+            1.0F / std::sqrt(variance + epsilon);
+
+        for (std::size_t feature = 0;
+             feature < feature_count;
+             ++feature) {
+            const std::size_t index = row_start + feature;
+            const float normalized =
+                (input_data[index] - mean) *
+                inverse_standard_deviation;
+
+            result_data[index] =
+                normalized * weight_data[feature] +
+                bias_data[feature];
+        }
     }
 
     return result;

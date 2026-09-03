@@ -1,9 +1,11 @@
 #include "gpt2/layers.h"
 
 #include <array>
+#include <cmath>
 #include <cstdlib>
 #include <exception>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string_view>
 #include <vector>
@@ -15,6 +17,21 @@ int failure_count = 0;
 void expect(bool condition, std::string_view message) {
     if (!condition) {
         std::cerr << "FAIL: " << message << '\n';
+        ++failure_count;
+    }
+}
+
+void expect_near(
+    float actual,
+    float expected,
+    float tolerance,
+    std::string_view message
+) {
+    if (!std::isfinite(actual) ||
+        std::fabs(actual - expected) > tolerance) {
+        std::cerr << "FAIL: " << message
+                  << " (expected " << expected
+                  << ", got " << actual << ")\n";
         ++failure_count;
     }
 }
@@ -117,6 +134,197 @@ void test_out_of_range_token_id() {
     );
 }
 
+void test_layer_norm_normalizes_rows_independently() {
+    const gpt2::Tensor input(
+        {2, 2},
+        std::vector<float>{1.0F, 3.0F, 2.0F, 6.0F}
+    );
+    const gpt2::Tensor weight(
+        {2},
+        std::vector<float>{1.0F, 1.0F}
+    );
+    const gpt2::Tensor bias(
+        {2},
+        std::vector<float>{0.0F, 0.0F}
+    );
+
+    const gpt2::Tensor result =
+        gpt2::layer_norm(input, weight, bias);
+
+    expect(
+        result.shape() == input.shape(),
+        "layer norm preserves the input shape"
+    );
+    expect_near(
+        result.at(0),
+        -0.999995F,
+        1.0e-5F,
+        "first row's lower value is normalized"
+    );
+    expect_near(
+        result.at(1),
+        0.999995F,
+        1.0e-5F,
+        "first row's upper value is normalized"
+    );
+    expect_near(
+        result.at(2),
+        -0.999999F,
+        1.0e-5F,
+        "second row's lower value is normalized independently"
+    );
+    expect_near(
+        result.at(3),
+        0.999999F,
+        1.0e-5F,
+        "second row's upper value is normalized independently"
+    );
+    expect(input.at(0) == 1.0F, "layer norm leaves its input unchanged");
+}
+
+void test_layer_norm_applies_weight_and_bias() {
+    const gpt2::Tensor input(
+        {1, 2},
+        std::vector<float>{1.0F, 3.0F}
+    );
+    const gpt2::Tensor weight(
+        {2},
+        std::vector<float>{2.0F, 0.5F}
+    );
+    const gpt2::Tensor bias(
+        {2},
+        std::vector<float>{10.0F, -3.0F}
+    );
+
+    const gpt2::Tensor result =
+        gpt2::layer_norm(input, weight, bias);
+
+    expect_near(
+        result.at(0),
+        8.00001F,
+        1.0e-5F,
+        "layer norm applies the first learned weight and bias"
+    );
+    expect_near(
+        result.at(1),
+        -2.5F,
+        1.0e-5F,
+        "layer norm applies the second learned weight and bias"
+    );
+}
+
+void test_layer_norm_constant_row() {
+    const gpt2::Tensor input(
+        {1, 3},
+        std::vector<float>{7.0F, 7.0F, 7.0F}
+    );
+    const gpt2::Tensor weight(
+        {3},
+        std::vector<float>{2.0F, 3.0F, 4.0F}
+    );
+    const gpt2::Tensor bias(
+        {3},
+        std::vector<float>{0.5F, -1.0F, 2.0F}
+    );
+
+    const gpt2::Tensor result =
+        gpt2::layer_norm(input, weight, bias);
+
+    expect(result.at(0) == 0.5F, "constant row returns first bias value");
+    expect(result.at(1) == -1.0F, "constant row returns second bias value");
+    expect(result.at(2) == 2.0F, "constant row returns third bias value");
+}
+
+void test_invalid_layer_norm_parameters() {
+    expect_throws<std::invalid_argument>(
+        [] {
+            const gpt2::Tensor input({1, 2});
+            const gpt2::Tensor weight({1, 2});
+            const gpt2::Tensor bias({2});
+            static_cast<void>(gpt2::layer_norm(input, weight, bias));
+        },
+        "layer norm rejects a non-vector weight"
+    );
+
+    expect_throws<std::invalid_argument>(
+        [] {
+            const gpt2::Tensor input({1, 2});
+            const gpt2::Tensor weight({2});
+            const gpt2::Tensor bias({1, 2});
+            static_cast<void>(gpt2::layer_norm(input, weight, bias));
+        },
+        "layer norm rejects a non-vector bias"
+    );
+
+    expect_throws<std::invalid_argument>(
+        [] {
+            const gpt2::Tensor input({1, 2});
+            const gpt2::Tensor weight({3});
+            const gpt2::Tensor bias({2});
+            static_cast<void>(gpt2::layer_norm(input, weight, bias));
+        },
+        "layer norm rejects a weight with the wrong length"
+    );
+
+    expect_throws<std::invalid_argument>(
+        [] {
+            const gpt2::Tensor input({1, 2});
+            const gpt2::Tensor weight({2});
+            const gpt2::Tensor bias({3});
+            static_cast<void>(gpt2::layer_norm(input, weight, bias));
+        },
+        "layer norm rejects a bias with the wrong length"
+    );
+}
+
+void test_invalid_layer_norm_epsilon() {
+    const gpt2::Tensor input({1, 2});
+    const gpt2::Tensor weight({2});
+    const gpt2::Tensor bias({2});
+
+    expect_throws<std::invalid_argument>(
+        [&] {
+            static_cast<void>(
+                gpt2::layer_norm(input, weight, bias, 0.0F)
+            );
+        },
+        "layer norm rejects zero epsilon"
+    );
+
+    expect_throws<std::invalid_argument>(
+        [&] {
+            static_cast<void>(
+                gpt2::layer_norm(input, weight, bias, -1.0F)
+            );
+        },
+        "layer norm rejects negative epsilon"
+    );
+
+    expect_throws<std::invalid_argument>(
+        [&] {
+            static_cast<void>(gpt2::layer_norm(
+                input,
+                weight,
+                bias,
+                std::numeric_limits<float>::infinity()
+            ));
+        },
+        "layer norm rejects infinite epsilon"
+    );
+
+    expect_throws<std::invalid_argument>(
+        [&] {
+            static_cast<void>(gpt2::layer_norm(
+                input,
+                weight,
+                bias,
+                std::numeric_limits<float>::quiet_NaN()
+            ));
+        },
+        "layer norm rejects NaN epsilon"
+    );
+}
+
 }  // namespace
 
 int main() {
@@ -124,6 +332,11 @@ int main() {
     test_invalid_embedding_table_rank();
     test_empty_token_sequence();
     test_out_of_range_token_id();
+    test_layer_norm_normalizes_rows_independently();
+    test_layer_norm_applies_weight_and_bias();
+    test_layer_norm_constant_row();
+    test_invalid_layer_norm_parameters();
+    test_invalid_layer_norm_epsilon();
 
     if (failure_count != 0) {
         std::cerr << failure_count << " test assertion(s) failed\n";

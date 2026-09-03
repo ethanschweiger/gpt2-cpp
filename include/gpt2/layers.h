@@ -12,4 +12,11 @@ Tensor embedding_lookup(
     std::span<const std::size_t> token_ids
 );
 
+Tensor layer_norm(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor& bias,
+    float epsilon = 1.0e-5F
+);
+
 }  // namespace gpt2
