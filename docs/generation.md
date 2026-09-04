@@ -24,6 +24,9 @@ const std::string continuation =
 the prompt it already has. `generate_sampled` is the same loop with a
 draw in place of the argmax; see [Sampling](#sampling).
 
+For a complete checkpoint-to-text command, see
+[Command-line generation](cli.md).
+
 ## How a step works
 
 The default cached path runs the prompt once, then sends one new token

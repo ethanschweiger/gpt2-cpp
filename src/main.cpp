@@ -1,6 +1,12 @@
+#include "cli.h"
+
 #include <iostream>
 
-int main() {
-	std::cout << "GPT-2 CPP inference engine\n";
-	return 0;
+int main(int argument_count, char* arguments[]) {
+    return gpt2::run_cli(
+        argument_count,
+        arguments,
+        std::cout,
+        std::cerr
+    );
 }

@@ -101,6 +101,7 @@ target_include_directories(gpt2_core PUBLIC include)
 gpt2_enable_warnings(gpt2_core)
 
 add_executable(gpt2
+    src/cli.cpp
     src/main.cpp
 )
 
@@ -221,6 +222,18 @@ if(BUILD_TESTING)
 
     add_test(NAME tokenizer_unit COMMAND gpt2_tokenizer_tests)
     set_tests_properties(tokenizer_unit PROPERTIES LABELS unit)
+
+    add_executable(gpt2_cli_tests
+        src/cli.cpp
+        tests/cli_test.cpp
+    )
+
+    target_include_directories(gpt2_cli_tests PRIVATE src)
+    target_link_libraries(gpt2_cli_tests PRIVATE gpt2_core)
+    gpt2_enable_warnings(gpt2_cli_tests)
+
+    add_test(NAME cli_unit COMMAND gpt2_cli_tests)
+    set_tests_properties(cli_unit PROPERTIES LABELS unit)
 
     add_test(
         NAME checkpoint_writer_unit
@@ -442,6 +455,60 @@ if(BUILD_TESTING)
             RUN_SERIAL TRUE
             TIMEOUT 1800
         )
+
+        add_test(
+            NAME gpt2_cli_generation_smoke
+            COMMAND
+                gpt2
+                "--checkpoint"
+                "${GPT2_GENERATION_CHECKPOINT_ABSOLUTE}"
+                "--vocab"
+                "${GPT2_GENERATION_VOCABULARY_ABSOLUTE}"
+                "--merges"
+                "${GPT2_GENERATION_MERGES_ABSOLUTE}"
+                "--prompt"
+                "The capital of France is"
+                "--max-new-tokens"
+                "8"
+        )
+        set_tests_properties(gpt2_cli_generation_smoke PROPERTIES
+            LABELS "integration;real-model;generation;cli;slow"
+            PASS_REGULAR_EXPRESSION
+                "The capital of France is the capital of the French Republic, and"
+            RUN_SERIAL TRUE
+            TIMEOUT 300
+        )
+
+        add_test(
+            NAME gpt2_cli_sampling_smoke
+            COMMAND
+                gpt2
+                "--checkpoint"
+                "${GPT2_GENERATION_CHECKPOINT_ABSOLUTE}"
+                "--vocab"
+                "${GPT2_GENERATION_VOCABULARY_ABSOLUTE}"
+                "--merges"
+                "${GPT2_GENERATION_MERGES_ABSOLUTE}"
+                "--prompt"
+                "Once upon a time"
+                "--max-new-tokens"
+                "2"
+                "--sample"
+                "--temperature"
+                "0.8"
+                "--top-k"
+                "40"
+                "--top-p"
+                "0.95"
+                "--seed"
+                "42"
+        )
+        set_tests_properties(gpt2_cli_sampling_smoke PROPERTIES
+            LABELS "integration;real-model;generation;sampling;cli;slow"
+            PASS_REGULAR_EXPRESSION "Once upon a time"
+            RUN_SERIAL TRUE
+            TIMEOUT 300
+        )
     endif()
 
     if(GPT2_ENABLE_TOKENIZER_PARITY)
@@ -512,9 +579,9 @@ if(BUILD_TESTING)
         )
     endif()
 
-    add_test(NAME cli_smoke COMMAND gpt2)
+    add_test(NAME cli_smoke COMMAND gpt2 --help)
     set_tests_properties(cli_smoke PROPERTIES
         LABELS smoke
-        PASS_REGULAR_EXPRESSION "GPT-2 CPP inference engine"
+        PASS_REGULAR_EXPRESSION "Usage:"
     )
 endif()
