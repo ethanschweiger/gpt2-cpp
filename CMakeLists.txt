@@ -16,6 +16,23 @@ option(GPT2_ENABLE_HF_TESTS
     OFF
 )
 
+option(GPT2_ENABLE_GPT2_SMALL_PARITY
+    "Enable offline GPT-2 Small full-forward parity testing"
+    OFF
+)
+
+set(GPT2_SMALL_CHECKPOINT
+    "${PROJECT_SOURCE_DIR}/models/gpt2-small-fp32.bin"
+    CACHE FILEPATH
+    "Path to the exported GPT-2 Small FP32 checkpoint"
+)
+
+set(GPT2_SMALL_HF_REFERENCE
+    "${PROJECT_SOURCE_DIR}/models/huggingface-cache/hub/models--openai-community--gpt2/snapshots/607a30d783dfa663caf39e06633721c8d4cfcd7e"
+    CACHE PATH
+    "Path to the matching Hugging Face GPT-2 Small snapshot"
+)
+
 function(gpt2_enable_warnings target_name)
     if(MSVC)
         target_compile_options(${target_name} PRIVATE
@@ -158,7 +175,7 @@ if(BUILD_TESTING)
         ENVIRONMENT "PYTHONPATH=${PROJECT_SOURCE_DIR}/tools"
     )
 
-    if(GPT2_ENABLE_HF_TESTS)
+    if(GPT2_ENABLE_HF_TESTS OR GPT2_ENABLE_GPT2_SMALL_PARITY)
         execute_process(
             COMMAND
                 "${Python3_EXECUTABLE}"
@@ -171,11 +188,13 @@ if(BUILD_TESTING)
 
         if(NOT GPT2_HF_IMPORT_RESULT EQUAL 0)
             message(FATAL_ERROR
-                "GPT2_ENABLE_HF_TESTS requires packages from "
+                "Hugging Face tests require packages from "
                 "requirements-export.txt:\n${GPT2_HF_IMPORT_ERROR}"
             )
         endif()
+    endif()
 
+    if(GPT2_ENABLE_HF_TESTS)
         add_test(
             NAME gpt2_hf_exporter_integration
             COMMAND
@@ -186,6 +205,63 @@ if(BUILD_TESTING)
             LABELS "integration;huggingface"
             ENVIRONMENT
                 "PYTHONPATH=${PROJECT_SOURCE_DIR}/tools;HF_HUB_OFFLINE=1;TRANSFORMERS_OFFLINE=1"
+        )
+    endif()
+
+    if(GPT2_ENABLE_GPT2_SMALL_PARITY)
+        get_filename_component(
+            GPT2_SMALL_CHECKPOINT_ABSOLUTE
+            "${GPT2_SMALL_CHECKPOINT}"
+            ABSOLUTE
+            BASE_DIR "${PROJECT_SOURCE_DIR}"
+        )
+
+        get_filename_component(
+            GPT2_SMALL_HF_REFERENCE_ABSOLUTE
+            "${GPT2_SMALL_HF_REFERENCE}"
+            ABSOLUTE
+            BASE_DIR "${PROJECT_SOURCE_DIR}"
+        )
+
+        if(NOT EXISTS "${GPT2_SMALL_CHECKPOINT_ABSOLUTE}")
+            message(FATAL_ERROR
+                "GPT-2 Small checkpoint does not exist: "
+                "${GPT2_SMALL_CHECKPOINT_ABSOLUTE}"
+            )
+        endif()
+
+        if(NOT IS_DIRECTORY "${GPT2_SMALL_HF_REFERENCE_ABSOLUTE}")
+            message(FATAL_ERROR
+                "Hugging Face GPT-2 Small snapshot does not exist: "
+                "${GPT2_SMALL_HF_REFERENCE_ABSOLUTE}"
+            )
+        endif()
+
+        add_executable(gpt2_real_model_runner
+            tests/real_model_runner.cpp
+        )
+
+        target_link_libraries(gpt2_real_model_runner PRIVATE gpt2_core)
+        gpt2_enable_warnings(gpt2_real_model_runner)
+
+        add_test(
+            NAME gpt2_real_model_parity
+            COMMAND
+                "${Python3_EXECUTABLE}"
+                "${PROJECT_SOURCE_DIR}/tests/real_model_parity_test.py"
+                "--runner"
+                "$<TARGET_FILE:gpt2_real_model_runner>"
+                "--checkpoint"
+                "${GPT2_SMALL_CHECKPOINT_ABSOLUTE}"
+                "--hf-reference"
+                "${GPT2_SMALL_HF_REFERENCE_ABSOLUTE}"
+        )
+        set_tests_properties(gpt2_real_model_parity PROPERTIES
+            LABELS "integration;huggingface;real-model;slow"
+            ENVIRONMENT
+                "HF_HUB_OFFLINE=1;TRANSFORMERS_OFFLINE=1;TOKENIZERS_PARALLELISM=false"
+            RUN_SERIAL TRUE
+            TIMEOUT 900
         )
     endif()
 
