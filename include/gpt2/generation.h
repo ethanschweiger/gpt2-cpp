@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <optional>
+#include <random>
 #include <span>
 #include <vector>
 
@@ -16,7 +17,7 @@ enum class GenerationStop {
     context_limit,
 };
 
-struct GreedyGenerationOptions {
+struct GenerationLimits {
     std::size_t maximum_new_tokens = 0;
 
     // Generation stops as soon as this token is chosen, and the token
@@ -24,9 +25,24 @@ struct GreedyGenerationOptions {
     std::optional<std::size_t> end_of_text_id;
 };
 
-struct GreedyGeneration {
+struct Generation {
     std::vector<std::size_t> new_token_ids;
     GenerationStop stop = GenerationStop::token_limit;
+};
+
+struct SamplingOptions {
+    // Divides the scores before they become probabilities. Lower values
+    // sharpen the distribution toward the highest-scoring token.
+    float temperature = 1.0F;
+
+    // Keeps every token scoring at least as high as the top_k-th score,
+    // so a tie at that score keeps more than top_k tokens. Zero keeps
+    // the whole vocabulary.
+    std::size_t top_k = 0;
+
+    // Keeps the most likely tokens whose probabilities reach top_p, and
+    // always keeps at least one. A value of one keeps everything.
+    float top_p = 1.0F;
 };
 
 // Extends the prompt one token at a time, always taking the
@@ -35,10 +51,36 @@ struct GreedyGeneration {
 //
 // Every step re-runs the whole forward pass, so a run costs one forward
 // pass per new token over a sequence that grows by one each time.
-GreedyGeneration generate_greedy(
+Generation generate_greedy(
     const Gpt2Model& model,
     std::span<const std::size_t> prompt_token_ids,
-    const GreedyGenerationOptions& options
+    const GenerationLimits& limits
+);
+
+// The same loop, drawing each token from the filtered distribution
+// instead of taking the highest score. The generator supplies every
+// random draw, so seeding it fixes the whole run.
+Generation generate_sampled(
+    const Gpt2Model& model,
+    std::span<const std::size_t> prompt_token_ids,
+    const GenerationLimits& limits,
+    const SamplingOptions& sampling,
+    std::mt19937_64& generator
+);
+
+// Applies temperature, top-k and top-p to one row of scores and returns
+// the probability of every token in the vocabulary. Filtered-out tokens
+// have probability zero and the result sums to one.
+std::vector<float> sampling_distribution(
+    std::span<const float> scores,
+    const SamplingOptions& options
+);
+
+// Draws one token from that distribution.
+std::size_t sample_token(
+    std::span<const float> scores,
+    const SamplingOptions& options,
+    std::mt19937_64& generator
 );
 
 }  // namespace gpt2

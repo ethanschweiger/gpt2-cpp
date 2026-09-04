@@ -67,7 +67,7 @@ std::string_view describe(gpt2::GenerationStop stop) {
 }
 
 void expect_generation(
-    const gpt2::GreedyGeneration& actual,
+    const gpt2::Generation& actual,
     const TokenIds& expected_tokens,
     gpt2::GenerationStop expected_stop,
     std::string_view message
@@ -122,8 +122,8 @@ gpt2::Gpt2Model load_fixture_model() {
     return load_model(make_model_tensors(alternate_index_multiplier));
 }
 
-gpt2::GreedyGenerationOptions token_limit(std::size_t maximum) {
-    gpt2::GreedyGenerationOptions options;
+gpt2::GenerationLimits token_limit(std::size_t maximum) {
+    gpt2::GenerationLimits options;
     options.maximum_new_tokens = maximum;
     return options;
 }
@@ -221,7 +221,7 @@ void test_generation_stops_at_the_end_of_text_token() {
     const gpt2::Gpt2Model model = load_fixture_model();
     const std::array<std::size_t, 1> prompt{1};
 
-    gpt2::GreedyGenerationOptions stop_on_first = token_limit(8);
+    gpt2::GenerationLimits stop_on_first = token_limit(8);
     stop_on_first.end_of_text_id = 1;
     expect_generation(
         gpt2::generate_greedy(model, prompt, stop_on_first),
@@ -230,7 +230,7 @@ void test_generation_stops_at_the_end_of_text_token() {
         "generation stops on the end-of-text token"
     );
 
-    gpt2::GreedyGenerationOptions stop_on_last = token_limit(8);
+    gpt2::GenerationLimits stop_on_last = token_limit(8);
     stop_on_last.end_of_text_id = 2;
     expect_generation(
         gpt2::generate_greedy(model, prompt, stop_on_last),
@@ -239,7 +239,7 @@ void test_generation_stops_at_the_end_of_text_token() {
         "generation stops on a later end-of-text token"
     );
 
-    gpt2::GreedyGenerationOptions never_stops = token_limit(8);
+    gpt2::GenerationLimits never_stops = token_limit(8);
     never_stops.end_of_text_id = 6;
     expect_generation(
         gpt2::generate_greedy(model, prompt, never_stops),

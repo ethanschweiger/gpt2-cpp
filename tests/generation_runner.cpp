@@ -121,7 +121,7 @@ int main(int argument_count, char** arguments) {
             );
         }
 
-        gpt2::GreedyGenerationOptions options;
+        gpt2::GenerationLimits options;
         options.end_of_text_id = tokenizer.end_of_text_id();
 
         std::string line;
@@ -146,7 +146,7 @@ int main(int argument_count, char** arguments) {
 
             const std::vector<std::size_t> prompt_token_ids =
                 tokenizer.encode(prompt);
-            const gpt2::GreedyGeneration generation =
+            const gpt2::Generation generation =
                 gpt2::generate_greedy(model, prompt_token_ids, options);
 
             output << describe(generation.stop);

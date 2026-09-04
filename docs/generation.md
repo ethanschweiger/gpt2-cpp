@@ -6,14 +6,14 @@ taking the highest-scoring token from the model's last position.
 ```cpp
 #include "gpt2/generation.h"
 
-gpt2::GreedyGenerationOptions options;
-options.maximum_new_tokens = 20;
-options.end_of_text_id = tokenizer.end_of_text_id();
+gpt2::GenerationLimits limits;
+limits.maximum_new_tokens = 20;
+limits.end_of_text_id = tokenizer.end_of_text_id();
 
-const gpt2::GreedyGeneration generation = gpt2::generate_greedy(
+const gpt2::Generation generation = gpt2::generate_greedy(
     model,
     tokenizer.encode("The capital of France is"),
-    options
+    limits
 );
 
 const std::string continuation =
@@ -21,7 +21,8 @@ const std::string continuation =
 ```
 
 `generate_greedy` returns only the appended tokens, so the caller keeps
-the prompt it already has.
+the prompt it already has. `generate_sampled` is the same loop with a
+draw in place of the argmax; see [Sampling](#sampling).
 
 ## How a step works
 
@@ -38,7 +39,7 @@ token.
 ## Stopping
 
 Generation stops for one of three reasons, reported in
-`GreedyGeneration::stop`:
+`Generation::stop`:
 
 | `GenerationStop` | Meaning |
 | --- | --- |
@@ -53,6 +54,89 @@ for GPT-2, which is 50256.
 An empty prompt and a prompt longer than the context window are both
 rejected with `std::invalid_argument`; a prompt that already fills the
 context window is not an error and simply generates nothing.
+
+## Sampling
+
+`generate_sampled` replaces the argmax with a draw from a filtered
+distribution.
+
+```cpp
+gpt2::SamplingOptions sampling;
+sampling.temperature = 0.8F;
+sampling.top_k = 40;
+sampling.top_p = 0.95F;
+
+std::mt19937_64 generator(20260905);
+const gpt2::Generation generation = gpt2::generate_sampled(
+    model, prompt_token_ids, limits, sampling, generator
+);
+```
+
+The generator supplies every random draw, so seeding it fixes the whole
+run. Two lower-level entry points are public because they are worth
+testing on their own: `sampling_distribution` applies the filters and
+returns the probability of every token, and `sample_token` draws from
+that distribution.
+
+Each step applies temperature, then top-k, then top-p, in that order.
+
+**Temperature** divides the scores. Values below one sharpen the
+distribution toward the highest score; values above one flatten it. It
+must be finite and greater than zero — there is no "temperature of zero
+means greedy" special case, because that would make the deterministic
+path depend on a floating-point comparison against zero. Use
+`generate_greedy` instead, or a temperature small enough to collapse the
+distribution; the unit tests check that 0.01 reproduces greedy output
+exactly.
+
+**Top-k** keeps every token scoring at least as high as the k-th score.
+That is not the same as keeping k tokens: scores of `[3, 1, 1, 1, 0]`
+with `top_k = 2` keep **four** tokens, because three of them tie at the
+boundary. This matches the reference implementation, which compares
+against the k-th score rather than truncating a sorted list.
+
+**Top-p** keeps the most likely tokens whose probabilities reach p, and
+always keeps at least one. It accumulates from the *least* likely token
+and drops while the running total stays at or below `1 - p`. Walking
+down from the most likely token instead is equivalent in exact
+arithmetic and disagrees in floating point: measured against the
+reference over 12,800 configurations, the descending rule differed on
+218 of them and the ascending rule on none.
+
+Scores that are not a number are dropped rather than sampled, and a
+score vector with nothing finite in it throws instead of returning an
+arbitrary token.
+
+### Reproducibility
+
+The uniform draw is taken from the engine directly rather than through
+`std::uniform_real_distribution`, because the C++ standard fixes the
+output of `std::mt19937_64` but not the algorithm any distribution uses
+to consume it. A seed therefore reproduces a run across standard library
+implementations, not only across runs of one binary.
+
+### Precision
+
+The filters work in double even though the scores arrive as float. A
+sharpening temperature spreads the scores far enough that a float
+subtraction inside the softmax costs several digits in the exponent, and
+summing 50,257 terms in float loses more. The result is rounded back to
+float only at the end.
+
+That makes GPT2CPP *more* accurate than a float32 reference, which is
+worth stating precisely, because it means an exact comparison against
+one would be measuring the reference's rounding:
+
+| comparison | largest probability difference |
+| --- | --- |
+| GPT2CPP versus a float64 reference | 3.45e-08 |
+| GPT2CPP versus a float32 reference | 8.26e-06 |
+| float32 versus float64 reference | 8.26e-06 |
+
+The second and third rows agree to two digits, which says the whole gap
+between GPT2CPP and the float32 reference is that reference's own
+rounding error. Measured against the accurate answer, GPT2CPP is about
+240 times closer.
 
 ## Cost
 
@@ -79,6 +163,51 @@ The fixture is parameterized so that the generation tests use a variant
 whose greedy continuation *changes* between steps. That matters: with a
 model that repeats one token forever, an implementation that reused the
 first step's logits would still pass.
+
+### Sampling parity
+
+A second opt-in test compares the filters themselves against Hugging
+Face's `TemperatureLogitsWarper`, `TopKLogitsWarper` and
+`TopPLogitsWarper` across vocabulary sizes from 2 to 50,257, six
+temperatures, six top-k values and seven top-p values, plus cases with
+deliberately tied scores.
+
+```bash
+cmake -S . -B build-sampling \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DGPT2_WARNINGS_AS_ERRORS=ON \
+  -DGPT2_ENABLE_SAMPLING_PARITY=ON \
+  -DPython3_EXECUTABLE="$PWD/.venv/bin/python"
+```
+
+```bash
+cmake --build build-sampling --parallel
+ctest --test-dir build-sampling -L sampling --output-on-failure -V
+```
+
+Which tokens survive is compared exactly; the probabilities are compared
+against a float64 reference for the reason given above. Two cases are
+classified rather than failed, because the reference does not define
+them:
+
+- A token whose probability is smaller than float32 can represent reads
+  as zero once stored. That is underflow, not a filter disagreement.
+- When scores tie at the top-p boundary, which of the equally likely
+  tokens survives depends on the sort order, and `torch.sort` is not
+  stable. The kept count and the kept distribution are still well
+  defined, so those are compared instead.
+
+#### Baseline result
+
+```text
+filter configurations compared:                          1,828
+probabilities compared:                             13,638,216
+kept-token-set mismatches:                                   0
+tokens too small to store as float32:                  125,263
+configurations where tied scores make the boundary ambiguous: 45
+largest probability difference from the float64 reference: 3.45e-08
+mismatches:                                                  0
+```
 
 ### End-to-end parity
 

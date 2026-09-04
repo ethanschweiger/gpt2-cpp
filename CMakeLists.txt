@@ -31,6 +31,11 @@ option(GPT2_ENABLE_GENERATION_PARITY
     OFF
 )
 
+option(GPT2_ENABLE_SAMPLING_PARITY
+    "Enable offline GPT-2 sampling-filter parity testing"
+    OFF
+)
+
 set(GPT2_SMALL_CHECKPOINT
     "${PROJECT_SOURCE_DIR}/models/gpt2-small-fp32.bin"
     CACHE FILEPATH
@@ -187,6 +192,16 @@ if(BUILD_TESTING)
     add_test(NAME generation_unit COMMAND gpt2_generation_tests)
     set_tests_properties(generation_unit PROPERTIES LABELS unit)
 
+    add_executable(gpt2_sampling_tests
+        tests/sampling_test.cpp
+    )
+
+    target_link_libraries(gpt2_sampling_tests PRIVATE gpt2_core)
+    gpt2_enable_warnings(gpt2_sampling_tests)
+
+    add_test(NAME sampling_unit COMMAND gpt2_sampling_tests)
+    set_tests_properties(sampling_unit PROPERTIES LABELS unit)
+
     add_executable(gpt2_tokenizer_tests
         tests/tokenizer_test.cpp
     )
@@ -222,7 +237,8 @@ if(BUILD_TESTING)
     if(GPT2_ENABLE_HF_TESTS OR
        GPT2_ENABLE_GPT2_SMALL_PARITY OR
        GPT2_ENABLE_TOKENIZER_PARITY OR
-       GPT2_ENABLE_GENERATION_PARITY)
+       GPT2_ENABLE_GENERATION_PARITY OR
+       GPT2_ENABLE_SAMPLING_PARITY)
         execute_process(
             COMMAND
                 "${Python3_EXECUTABLE}"
@@ -308,6 +324,30 @@ if(BUILD_TESTING)
             ENVIRONMENT
                 "HF_HUB_OFFLINE=1;TRANSFORMERS_OFFLINE=1;TOKENIZERS_PARALLELISM=false"
             RUN_SERIAL TRUE
+            TIMEOUT 900
+        )
+    endif()
+
+    if(GPT2_ENABLE_SAMPLING_PARITY)
+        add_executable(gpt2_sampling_runner
+            tests/sampling_runner.cpp
+        )
+
+        target_link_libraries(gpt2_sampling_runner PRIVATE gpt2_core)
+        gpt2_enable_warnings(gpt2_sampling_runner)
+
+        add_test(
+            NAME gpt2_sampling_parity
+            COMMAND
+                "${Python3_EXECUTABLE}"
+                "${PROJECT_SOURCE_DIR}/tests/sampling_parity_test.py"
+                "--runner"
+                "$<TARGET_FILE:gpt2_sampling_runner>"
+        )
+        set_tests_properties(gpt2_sampling_parity PROPERTIES
+            LABELS "integration;huggingface;sampling"
+            ENVIRONMENT
+                "HF_HUB_OFFLINE=1;TRANSFORMERS_OFFLINE=1;TOKENIZERS_PARALLELISM=false"
             TIMEOUT 900
         )
     endif()
