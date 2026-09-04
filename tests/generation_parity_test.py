@@ -57,8 +57,11 @@ def run_runner(
     vocabulary: Path,
     merges: Path,
 ) -> tuple[list[str], int]:
+    # Every prompt runs twice: once reusing cached keys and values and
+    # once recomputing the whole sequence at each step.
     requests = [
-        f"{budget} " + prompt.encode("utf-8").hex()
+        f"{budget} {int(use_cache)} " + prompt.encode("utf-8").hex()
+        for use_cache in (True, False)
         for prompt, budget in CASES
     ]
 
@@ -146,9 +149,10 @@ def main() -> None:
         args.vocabulary,
         args.merges,
     )
-    if len(answers) != len(CASES):
+    if len(answers) != 2 * len(CASES):
         raise AssertionError(
-            f"C++ runner answered {len(answers)} of {len(CASES)} requests"
+            f"C++ runner answered {len(answers)} of "
+            f"{2 * len(CASES)} requests"
         )
 
     model, tokenizer, torch = load_reference(
@@ -158,6 +162,7 @@ def main() -> None:
     )
 
     mismatches: list[str] = []
+    cache_mismatches: list[str] = []
     generated_token_count = 0
 
     print("GPT-2 Small greedy generation parity")
@@ -168,6 +173,15 @@ def main() -> None:
         fields = answers[index].split()
         stop_reason = fields[0]
         cpp_ids = [int(field) for field in fields[1:]]
+
+        uncached_fields = answers[index + len(CASES)].split()
+        uncached_ids = [int(field) for field in uncached_fields[1:]]
+        if cpp_ids != uncached_ids:
+            cache_mismatches.append(
+                f"  {prompt!r}\n"
+                f"    with cache:    {cpp_ids}\n"
+                f"    without cache: {uncached_ids}"
+            )
 
         prompt_ids = tokenizer.encode(prompt)
         with torch.inference_mode():
@@ -212,13 +226,20 @@ def main() -> None:
 
     print()
     print(f"  cases: {len(CASES)}")
+    print(f"  paths compared per case: 2 (cached and uncached)")
     print(f"  generated tokens compared: {generated_token_count}")
     print(f"  mismatches: {len(mismatches)}")
+    print(f"  cached-versus-uncached mismatches: {len(cache_mismatches)}")
 
     if context_length != EXPECTED_CONTEXT_LENGTH:
         raise AssertionError(
             "context length mismatch: "
             f"expected {EXPECTED_CONTEXT_LENGTH}, received {context_length}"
+        )
+    if cache_mismatches:
+        raise AssertionError(
+            "the cached and uncached paths generated different tokens:\n"
+            + "\n".join(cache_mismatches)
         )
     if mismatches:
         raise AssertionError(

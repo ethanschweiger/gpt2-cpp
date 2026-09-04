@@ -23,6 +23,12 @@ struct GenerationLimits {
     // Generation stops as soon as this token is chosen, and the token
     // is part of the result. Leave it empty to run to another limit.
     std::optional<std::size_t> end_of_text_id;
+
+    // Reuse the keys and values of earlier tokens instead of running
+    // the whole sequence again at every step. The two paths produce
+    // identical tokens; the uncached one exists for differential
+    // testing and for measuring what the cache is worth.
+    bool use_cache = true;
 };
 
 struct Generation {

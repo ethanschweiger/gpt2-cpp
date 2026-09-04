@@ -415,6 +415,34 @@ void test_sampling_is_reproducible() {
     static_cast<void>(third);
 }
 
+void test_cached_and_uncached_sampling_agree() {
+    const gpt2::Gpt2Model model = load_fixture_model();
+    const std::array<std::size_t, 1> prompt{1};
+
+    gpt2::SamplingOptions options;
+    options.temperature = 2.0F;
+
+    gpt2::GenerationLimits cached;
+    cached.maximum_new_tokens = 4;
+    gpt2::GenerationLimits uncached = cached;
+    uncached.use_cache = false;
+
+    for (std::uint64_t seed = 0; seed < 16; ++seed) {
+        std::mt19937_64 first(default_seed + seed);
+        std::mt19937_64 second(default_seed + seed);
+
+        expect(
+            gpt2::generate_sampled(
+                model, prompt, cached, options, first
+            ).new_token_ids ==
+                gpt2::generate_sampled(
+                    model, prompt, uncached, options, second
+                ).new_token_ids,
+            "the cached path draws the same tokens for a given seed"
+        );
+    }
+}
+
 void test_cold_sampling_reproduces_greedy() {
     const gpt2::Gpt2Model model = load_fixture_model();
 
@@ -578,6 +606,7 @@ int main() {
         test_draws_match_the_distribution();
         test_draws_match_a_renormalised_distribution();
         test_sampling_is_reproducible();
+        test_cached_and_uncached_sampling_agree();
         test_cold_sampling_reproduces_greedy();
         test_sampling_stops_at_the_end_of_text_token();
         test_sampling_rejects_invalid_options();

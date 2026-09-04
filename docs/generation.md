@@ -138,18 +138,65 @@ between GPT2CPP and the float32 reference is that reference's own
 rounding error. Measured against the accurate answer, GPT2CPP is about
 240 times closer.
 
-## Cost
+## The key/value cache
 
-There is no key/value cache yet, so the work is quadratic in the
-sequence length: generating `n` tokens from a prompt of `p` costs one
-full forward pass over `p`, then `p + 1`, and so on. On this machine a
-Release build spends roughly 0.17 seconds per token of sequence length,
-so a 4-token prompt extended by 12 tokens runs about 114 token-forwards,
-or roughly 19 seconds.
+Attention over a sequence recomputes the same keys and values every
+step: appending one token does not change what the earlier ones project
+to. `GenerationLimits::use_cache` (on by default) keeps them.
 
-Adding a key/value cache is the next performance milestone; it replaces
-that growing forward pass with a single-token step and is what makes
-generation practical.
+```cpp
+gpt2::KvCache cache(model.config());
+const gpt2::Tensor first = model.forward(prompt_token_ids, cache);
+const gpt2::Tensor next = model.forward(one_token, cache);
+```
+
+`Gpt2Model::forward` has an overload that appends tokens to a cache and
+returns the logits for those tokens alone. A cache is sized for the
+whole context window at construction and validated against the model's
+configuration on every call, so a cache built for a different model is
+rejected rather than silently producing nonsense.
+
+Without the cache, generating `n` tokens from a prompt of `p` costs full
+forward passes over `p`, `p + 1`, … — quadratic work. With it, the
+prompt is processed once and each new token costs a single-token step.
+
+### Cost
+
+Measured on GPT-2 Small, Release build, 8-token prompt extended by 24
+tokens:
+
+| | total | per token |
+| --- | --- | --- |
+| without cache | 50.16 s | 2.090 s |
+| with cache | 4.95 s | 0.206 s |
+
+**10.1× faster**, generating identical tokens. The gap widens with
+sequence length, because the uncached cost grows with every step while
+the cached cost does not.
+
+`tests/kv_cache_benchmark.cpp` produces these numbers and fails if the
+two paths disagree, so the measurement cannot drift away from the
+correctness claim.
+
+### Why the two paths agree exactly
+
+They do not merely agree closely — the logits are **bit for bit
+identical**, and `tests/kv_cache_test.cpp` asserts that on raw float
+bits rather than within a tolerance. Three properties make that true:
+
+- `matmul` accumulates strictly sequentially over the inner dimension,
+  and that dimension is the head size in both paths, so every dot
+  product is the same sum in the same order.
+- In the uncached path the causal mask sets future scores to negative
+  infinity, and `softmax` turns those into exact zeros. Adding zeros to
+  the running total leaves a float sum unchanged, so the denominator
+  matches the cached path's shorter sum exactly.
+- Multiplying those zero weights by the corresponding values
+  contributes exact zeros to the output as well.
+
+An implementation that reordered any of those sums would still be
+*correct*, but it would no longer be bit-identical, and the test would
+say so.
 
 ## Testing
 
@@ -213,7 +260,9 @@ mismatches:                                                  0
 
 The opt-in parity test drives the whole pipeline — text in, tokenizer,
 model, greedy loop, tokenizer out — and compares it with the same
-pipeline in Hugging Face.
+pipeline in Hugging Face. Every prompt runs twice, once with the cache
+and once without, so both paths are checked against the reference and
+against each other.
 
 Reproducibility controls match [Numerical Validation](numerical-validation.md)
 and [Tokenizer](tokenizer.md): the pinned revision
@@ -241,10 +290,12 @@ the two runs first differ.
 ### Baseline result
 
 ```text
-GPT2CPP context length:      1,024
-cases:                           3
-generated tokens compared:      32
-mismatches:                      0
+GPT2CPP context length:          1,024
+cases:                               3
+paths compared per case:             2
+generated tokens compared:          32
+mismatches:                          0
+cached-versus-uncached mismatches:   0
 ```
 
 ```text

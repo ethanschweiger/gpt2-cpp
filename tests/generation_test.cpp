@@ -186,6 +186,46 @@ void test_each_step_re_runs_the_forward_pass() {
     );
 }
 
+// The cache changes how the model computes, not what it computes, so
+// the two paths must agree token for token on every prompt.
+void test_cached_and_uncached_generation_agree() {
+    const gpt2::Gpt2Model model = load_fixture_model();
+
+    for (std::size_t first = 0; first < 7; ++first) {
+        const std::array<std::size_t, 1> prompt{first};
+
+        gpt2::GenerationLimits cached = token_limit(8);
+        gpt2::GenerationLimits uncached = token_limit(8);
+        uncached.use_cache = false;
+
+        const gpt2::Generation with_cache =
+            gpt2::generate_greedy(model, prompt, cached);
+        const gpt2::Generation without_cache =
+            gpt2::generate_greedy(model, prompt, uncached);
+
+        expect(
+            with_cache.new_token_ids == without_cache.new_token_ids,
+            "the cached path generates the same tokens"
+        );
+        expect(
+            with_cache.stop == without_cache.stop,
+            "the cached path stops for the same reason"
+        );
+    }
+
+    // Longer prompts exercise the cache being filled in one call and
+    // then extended one token at a time.
+    const std::array<std::size_t, 3> longer{2, 5, 1};
+    gpt2::GenerationLimits uncached = token_limit(4);
+    uncached.use_cache = false;
+    expect(
+        gpt2::generate_greedy(model, longer, token_limit(4))
+                .new_token_ids ==
+            gpt2::generate_greedy(model, longer, uncached).new_token_ids,
+        "the cached path agrees on a multi-token prompt"
+    );
+}
+
 void test_generation_respects_its_limits() {
     const gpt2::Gpt2Model model = load_fixture_model();
     const std::array<std::size_t, 1> prompt{1};
@@ -309,6 +349,7 @@ int main() {
     try {
         test_greedy_generation_matches_hugging_face();
         test_each_step_re_runs_the_forward_pass();
+        test_cached_and_uncached_generation_agree();
         test_generation_respects_its_limits();
         test_generation_stops_at_the_end_of_text_token();
         test_generation_rejects_invalid_prompts();

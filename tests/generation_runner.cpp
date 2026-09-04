@@ -5,9 +5,10 @@
 //   gpt2_generation_runner <checkpoint> <vocab.json> <merges.txt>
 //                          <requests> <answers>
 //
-// Each request line is "<max new tokens> <prompt hex>", where the hex
-// is the lowercase encoding of the prompt's UTF-8 bytes. Each answer
-// line is "<stop reason> <space-separated generated token IDs>".
+// Each request line is "<max new tokens> <use cache> <prompt hex>",
+// where the flag is 0 or 1 and the hex is the lowercase encoding of the
+// prompt's UTF-8 bytes. Each answer line is "<stop reason>
+// <space-separated generated token IDs>".
 
 #include "gpt2/checkpoint.h"
 #include "gpt2/generation.h"
@@ -137,11 +138,22 @@ int main(int argument_count, char** arguments) {
             if (separator == std::string::npos) {
                 throw std::runtime_error("request has no separator");
             }
+            const std::size_t second =
+                line.find(' ', separator + 1);
+            if (second == std::string::npos) {
+                throw std::runtime_error("request has no cache flag");
+            }
 
             options.maximum_new_tokens =
                 parse_count(std::string_view(line).substr(0, separator));
+            options.use_cache = parse_count(
+                std::string_view(line).substr(
+                    separator + 1,
+                    second - separator - 1
+                )
+            ) != 0;
             const std::string prompt = decode_hex(
-                std::string_view(line).substr(separator + 1)
+                std::string_view(line).substr(second + 1)
             );
 
             const std::vector<std::size_t> prompt_token_ids =

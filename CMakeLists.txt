@@ -192,6 +192,16 @@ if(BUILD_TESTING)
     add_test(NAME generation_unit COMMAND gpt2_generation_tests)
     set_tests_properties(generation_unit PROPERTIES LABELS unit)
 
+    add_executable(gpt2_kv_cache_tests
+        tests/kv_cache_test.cpp
+    )
+
+    target_link_libraries(gpt2_kv_cache_tests PRIVATE gpt2_core)
+    gpt2_enable_warnings(gpt2_kv_cache_tests)
+
+    add_test(NAME kv_cache_unit COMMAND gpt2_kv_cache_tests)
+    set_tests_properties(kv_cache_unit PROPERTIES LABELS unit)
+
     add_executable(gpt2_sampling_tests
         tests/sampling_test.cpp
     )
@@ -353,6 +363,13 @@ if(BUILD_TESTING)
     endif()
 
     if(GPT2_ENABLE_GENERATION_PARITY)
+        add_executable(gpt2_kv_cache_benchmark
+            tests/kv_cache_benchmark.cpp
+        )
+
+        target_link_libraries(gpt2_kv_cache_benchmark PRIVATE gpt2_core)
+        gpt2_enable_warnings(gpt2_kv_cache_benchmark)
+
         get_filename_component(
             GPT2_GENERATION_CHECKPOINT_ABSOLUTE
             "${GPT2_SMALL_CHECKPOINT}"

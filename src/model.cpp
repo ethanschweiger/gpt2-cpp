@@ -287,22 +287,63 @@ const ModelConfig& Gpt2Model::config() const {
     return checkpoint_m.config();
 }
 
-Tensor Gpt2Model::forward(
-    std::span<const std::size_t> token_ids
-) const {
+namespace {
+
+void validate_token_sequence(
+    std::span<const std::size_t> token_ids,
+    std::size_t available
+) {
     if (token_ids.empty()) {
         throw std::invalid_argument(
             "GPT-2 forward pass requires at least one token"
         );
     }
 
-    const std::size_t context_length =
-        static_cast<std::size_t>(config().context_length);
-    if (token_ids.size() > context_length) {
+    if (token_ids.size() > available) {
         throw std::invalid_argument(
             "token sequence exceeds the checkpoint context length"
         );
     }
+}
+
+}  // namespace
+
+KvCache::KvCache(const ModelConfig& config)
+    : embedding_size_m(config.embedding_size),
+      head_count_m(config.head_count) {
+    layers_m.reserve(static_cast<std::size_t>(config.layer_count));
+    for (std::uint32_t layer = 0; layer < config.layer_count; ++layer) {
+        layers_m.emplace_back(
+            static_cast<std::size_t>(config.context_length),
+            static_cast<std::size_t>(config.embedding_size)
+        );
+    }
+}
+
+std::size_t KvCache::length() const {
+    return layers_m.empty() ? 0 : layers_m.front().length;
+}
+
+std::size_t KvCache::capacity() const {
+    return layers_m.empty() ? 0 : layers_m.front().capacity();
+}
+
+std::size_t KvCache::layer_count() const {
+    return layers_m.size();
+}
+
+void KvCache::clear() {
+    for (AttentionCache& layer : layers_m) {
+        layer.clear();
+    }
+}
+
+Tensor Gpt2Model::forward(
+    std::span<const std::size_t> token_ids
+) const {
+    const std::size_t context_length =
+        static_cast<std::size_t>(config().context_length);
+    validate_token_sequence(token_ids, context_length);
 
     std::vector<std::size_t> position_ids(token_ids.size());
     std::iota(position_ids.begin(), position_ids.end(), std::size_t{0});
@@ -330,6 +371,69 @@ Tensor Gpt2Model::forward(
             hidden_state,
             parameters,
             head_count
+        );
+    }
+
+    hidden_state = layer_norm(
+        hidden_state,
+        checkpoint_m.tensor("transformer.ln_f.weight"),
+        checkpoint_m.tensor("transformer.ln_f.bias")
+    );
+
+    return tied_embedding_logits(
+        hidden_state,
+        checkpoint_m.tensor("transformer.wte.weight")
+    );
+}
+
+Tensor Gpt2Model::forward(
+    std::span<const std::size_t> token_ids,
+    KvCache& cache
+) const {
+    const std::size_t layer_count =
+        static_cast<std::size_t>(config().layer_count);
+    const std::size_t context_length =
+        static_cast<std::size_t>(config().context_length);
+
+    if (cache.layer_count() != layer_count ||
+        cache.capacity() != context_length ||
+        cache.embedding_size_m != config().embedding_size ||
+        cache.head_count_m != config().head_count) {
+        throw std::invalid_argument(
+            "cache was not built for this model configuration"
+        );
+    }
+
+    const std::size_t start = cache.length();
+    validate_token_sequence(token_ids, context_length - start);
+
+    // The cached tokens already occupy positions 0 through start - 1,
+    // so the new tokens continue from there.
+    std::vector<std::size_t> position_ids(token_ids.size());
+    std::iota(position_ids.begin(), position_ids.end(), start);
+
+    const Tensor token_state = embedding_lookup(
+        checkpoint_m.tensor("transformer.wte.weight"),
+        token_ids
+    );
+    const Tensor position_state = embedding_lookup(
+        checkpoint_m.tensor("transformer.wpe.weight"),
+        position_ids
+    );
+    Tensor hidden_state = add(token_state, position_state);
+
+    const std::size_t head_count =
+        static_cast<std::size_t>(config().head_count);
+
+    for (std::size_t layer = 0; layer < layer_count; ++layer) {
+        const TransformerBlockParameters parameters =
+            bind_block(checkpoint_m, layer);
+
+        hidden_state = transformer_block(
+            hidden_state,
+            parameters,
+            head_count,
+            cache.layers_m[layer]
         );
     }
 

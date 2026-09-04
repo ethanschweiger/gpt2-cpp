@@ -1,5 +1,6 @@
 #pragma once
 
+#include "gpt2/attention.h"
 #include "gpt2/tensor.h"
 
 #include <cstddef>
@@ -44,6 +45,15 @@ Tensor transformer_block(
     const Tensor& input,
     const TransformerBlockParameters& parameters,
     std::size_t head_count
+);
+
+// The same block with attention reading and extending a cache, so the
+// input holds only the tokens that have not been seen yet.
+Tensor transformer_block(
+    const Tensor& input,
+    const TransformerBlockParameters& parameters,
+    std::size_t head_count,
+    AttentionCache& cache
 );
 
 }  // namespace gpt2

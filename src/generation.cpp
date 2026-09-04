@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <optional>
 #include <numeric>
 #include <stdexcept>
 #include <vector>
@@ -276,25 +277,51 @@ Generation run_generation(
         );
     }
 
-    std::vector<std::size_t> sequence;
-    sequence.reserve(context_length);
-    sequence.assign(prompt_token_ids.begin(), prompt_token_ids.end());
-
     Generation generation;
     generation.new_token_ids.reserve(std::min(
         limits.maximum_new_tokens,
         context_length - prompt_token_ids.size()
     ));
 
+    // The cached path feeds the prompt once and then one token per
+    // step; the uncached path replays the whole sequence every time.
+    std::optional<KvCache> cache;
+    std::vector<std::size_t> sequence;
+    std::vector<std::size_t> pending;
+
+    if (limits.use_cache) {
+        cache.emplace(model.config());
+        pending.assign(
+            prompt_token_ids.begin(),
+            prompt_token_ids.end()
+        );
+    } else {
+        sequence.reserve(context_length);
+        sequence.assign(
+            prompt_token_ids.begin(),
+            prompt_token_ids.end()
+        );
+    }
+
+    std::size_t length = prompt_token_ids.size();
+
     while (generation.new_token_ids.size() < limits.maximum_new_tokens) {
-        if (sequence.size() >= context_length) {
+        if (length >= context_length) {
             generation.stop = GenerationStop::context_limit;
             return generation;
         }
 
-        const Tensor logits = model.forward(sequence);
+        const Tensor logits = cache.has_value()
+            ? model.forward(pending, *cache)
+            : model.forward(sequence);
         const std::size_t next_token = choose_token(last_row(logits));
-        sequence.push_back(next_token);
+
+        if (cache.has_value()) {
+            pending.assign(1, next_token);
+        } else {
+            sequence.push_back(next_token);
+        }
+        ++length;
         generation.new_token_ids.push_back(next_token);
 
         if (limits.end_of_text_id.has_value() &&
