@@ -26,6 +26,11 @@ option(GPT2_ENABLE_TOKENIZER_PARITY
     OFF
 )
 
+option(GPT2_ENABLE_GENERATION_PARITY
+    "Enable offline GPT-2 greedy-generation parity testing"
+    OFF
+)
+
 set(GPT2_SMALL_CHECKPOINT
     "${PROJECT_SOURCE_DIR}/models/gpt2-small-fp32.bin"
     CACHE FILEPATH
@@ -78,6 +83,7 @@ endfunction()
 add_library(gpt2_core STATIC
     src/attention.cpp
     src/checkpoint.cpp
+    src/generation.cpp
     src/layers.cpp
     src/model.cpp
     src/tensor.cpp
@@ -171,6 +177,16 @@ if(BUILD_TESTING)
     add_test(NAME model_unit COMMAND gpt2_model_tests)
     set_tests_properties(model_unit PROPERTIES LABELS unit)
 
+    add_executable(gpt2_generation_tests
+        tests/generation_test.cpp
+    )
+
+    target_link_libraries(gpt2_generation_tests PRIVATE gpt2_core)
+    gpt2_enable_warnings(gpt2_generation_tests)
+
+    add_test(NAME generation_unit COMMAND gpt2_generation_tests)
+    set_tests_properties(generation_unit PROPERTIES LABELS unit)
+
     add_executable(gpt2_tokenizer_tests
         tests/tokenizer_test.cpp
     )
@@ -205,7 +221,8 @@ if(BUILD_TESTING)
 
     if(GPT2_ENABLE_HF_TESTS OR
        GPT2_ENABLE_GPT2_SMALL_PARITY OR
-       GPT2_ENABLE_TOKENIZER_PARITY)
+       GPT2_ENABLE_TOKENIZER_PARITY OR
+       GPT2_ENABLE_GENERATION_PARITY)
         execute_process(
             COMMAND
                 "${Python3_EXECUTABLE}"
@@ -292,6 +309,81 @@ if(BUILD_TESTING)
                 "HF_HUB_OFFLINE=1;TRANSFORMERS_OFFLINE=1;TOKENIZERS_PARALLELISM=false"
             RUN_SERIAL TRUE
             TIMEOUT 900
+        )
+    endif()
+
+    if(GPT2_ENABLE_GENERATION_PARITY)
+        get_filename_component(
+            GPT2_GENERATION_CHECKPOINT_ABSOLUTE
+            "${GPT2_SMALL_CHECKPOINT}"
+            ABSOLUTE
+            BASE_DIR "${PROJECT_SOURCE_DIR}"
+        )
+
+        get_filename_component(
+            GPT2_GENERATION_VOCABULARY_ABSOLUTE
+            "${GPT2_SMALL_VOCABULARY}"
+            ABSOLUTE
+            BASE_DIR "${PROJECT_SOURCE_DIR}"
+        )
+
+        get_filename_component(
+            GPT2_GENERATION_MERGES_ABSOLUTE
+            "${GPT2_SMALL_MERGES}"
+            ABSOLUTE
+            BASE_DIR "${PROJECT_SOURCE_DIR}"
+        )
+
+        get_filename_component(
+            GPT2_GENERATION_REFERENCE_ABSOLUTE
+            "${GPT2_SMALL_HF_REFERENCE}"
+            ABSOLUTE
+            BASE_DIR "${PROJECT_SOURCE_DIR}"
+        )
+
+        foreach(GPT2_GENERATION_ASSET
+            "${GPT2_GENERATION_CHECKPOINT_ABSOLUTE}"
+            "${GPT2_GENERATION_VOCABULARY_ABSOLUTE}"
+            "${GPT2_GENERATION_MERGES_ABSOLUTE}"
+            "${GPT2_GENERATION_REFERENCE_ABSOLUTE}"
+        )
+            if(NOT EXISTS "${GPT2_GENERATION_ASSET}")
+                message(FATAL_ERROR
+                    "GPT-2 generation asset does not exist: "
+                    "${GPT2_GENERATION_ASSET}"
+                )
+            endif()
+        endforeach()
+
+        add_executable(gpt2_generation_runner
+            tests/generation_runner.cpp
+        )
+
+        target_link_libraries(gpt2_generation_runner PRIVATE gpt2_core)
+        gpt2_enable_warnings(gpt2_generation_runner)
+
+        add_test(
+            NAME gpt2_generation_parity
+            COMMAND
+                "${Python3_EXECUTABLE}"
+                "${PROJECT_SOURCE_DIR}/tests/generation_parity_test.py"
+                "--runner"
+                "$<TARGET_FILE:gpt2_generation_runner>"
+                "--checkpoint"
+                "${GPT2_GENERATION_CHECKPOINT_ABSOLUTE}"
+                "--vocabulary"
+                "${GPT2_GENERATION_VOCABULARY_ABSOLUTE}"
+                "--merges"
+                "${GPT2_GENERATION_MERGES_ABSOLUTE}"
+                "--hf-reference"
+                "${GPT2_GENERATION_REFERENCE_ABSOLUTE}"
+        )
+        set_tests_properties(gpt2_generation_parity PROPERTIES
+            LABELS "integration;huggingface;real-model;generation;slow"
+            ENVIRONMENT
+                "HF_HUB_OFFLINE=1;TRANSFORMERS_OFFLINE=1;TOKENIZERS_PARALLELISM=false"
+            RUN_SERIAL TRUE
+            TIMEOUT 1800
         )
     endif()
 

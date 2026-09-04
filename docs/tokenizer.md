@@ -211,7 +211,7 @@ through Hugging Face's lossy replacement.
 
 ```text
 GPT2CPP vocabulary size:                            50,257
-encode samples:                                     28,590
+encode samples:                                     28,587
 decode samples:                                      2,005
 encode mismatches:                                       0
 decode mismatches:                                       0

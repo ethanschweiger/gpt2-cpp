@@ -21,6 +21,10 @@ public:
 
     std::size_t vocabulary_size() const;
 
+    // The ID of the <|endoftext|> marker, which generation uses as
+    // its stopping token.
+    TokenId end_of_text_id() const;
+
     // Splits text on the <|endoftext|> marker, applies the GPT-2
     // pre-tokenizer to the remainder, and byte-level BPE encodes each
     // piece. Throws std::invalid_argument for invalid UTF-8.

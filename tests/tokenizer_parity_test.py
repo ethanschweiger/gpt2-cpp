@@ -26,8 +26,8 @@ REPORTED_MISMATCH_LIMIT = 10
 
 PROSE = (
     "The quick brown fox jumps over the lazy dog. "
-    "In 1948, Claude Shannon published A Mathematical Theory of "
-    "Communication; it didn't take long for the idea to spread. "
+    "In 1948, a Bell Labs paper founded information theory; "
+    "it didn't take long for the idea to spread. "
     "Prices rose 12.5% year-over-year, reaching $1,234.56 per unit -- "
     "an increase nobody's forecast had predicted.\n\n"
     "\tIndented lines, trailing spaces,   doubled  spaces, and\n"

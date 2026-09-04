@@ -869,6 +869,10 @@ std::size_t Gpt2Tokenizer::vocabulary_size() const {
     return id_to_token_m.size();
 }
 
+Gpt2Tokenizer::TokenId Gpt2Tokenizer::end_of_text_id() const {
+    return end_of_text_id_m;
+}
+
 std::vector<std::string> Gpt2Tokenizer::apply_bpe(
     std::string_view piece
 ) const {
