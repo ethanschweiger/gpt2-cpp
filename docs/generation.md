@@ -174,23 +174,12 @@ runs the MLP for every earlier token.
 
 ### Cost
 
-Measured on GPT-2 Small, Release build, 8-token prompt extended by 24
-tokens:
-
-| | total | per token |
-| --- | --- | --- |
-| without cache | 50.16 s | 2.090 s |
-| with cache | 4.95 s | 0.206 s |
-
-This preliminary run was **10.1× faster**, generating identical tokens.
-It is a one-run functional benchmark, not yet a stable resume metric:
-timings depend on the machine and run conditions, and the profiling phase
-will add warm-ups, repeated trials, summary statistics and environment
-metadata.
-
-`tests/kv_cache_benchmark.cpp` performs this comparison and fails if the
-two paths disagree. A rerun reports timings for the current machine and
-conditions rather than expecting these exact values.
+`benchmarks/generation_benchmark.cpp` measures both paths with warm-ups,
+alternating execution order and median timing across repeated trials. It
+also fails if their generated tokens differ. See
+[Benchmarking](benchmarks.md) for the methodology and reproducible
+commands. Hardware-specific baseline numbers are recorded separately
+rather than presented as universal performance.
 
 ### Why the two paths agree exactly
 

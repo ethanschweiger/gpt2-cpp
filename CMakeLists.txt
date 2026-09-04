@@ -36,6 +36,11 @@ option(GPT2_ENABLE_SAMPLING_PARITY
     OFF
 )
 
+option(GPT2_BUILD_BENCHMARKS
+    "Build the GPT-2 generation benchmark"
+    OFF
+)
+
 set(GPT2_SMALL_CHECKPOINT
     "${PROJECT_SOURCE_DIR}/models/gpt2-small-fp32.bin"
     CACHE FILEPATH
@@ -107,6 +112,18 @@ add_executable(gpt2
 
 target_link_libraries(gpt2 PRIVATE gpt2_core)
 gpt2_enable_warnings(gpt2)
+
+if(GPT2_BUILD_BENCHMARKS)
+    add_executable(gpt2_generation_benchmark
+        benchmarks/generation_benchmark.cpp
+    )
+
+    target_link_libraries(gpt2_generation_benchmark PRIVATE gpt2_core)
+    target_compile_definitions(gpt2_generation_benchmark PRIVATE
+        GPT2_BENCHMARK_BUILD_TYPE="$<CONFIG>"
+    )
+    gpt2_enable_warnings(gpt2_generation_benchmark)
+endif()
 
 include(CTest)
 
@@ -234,6 +251,17 @@ if(BUILD_TESTING)
 
     add_test(NAME cli_unit COMMAND gpt2_cli_tests)
     set_tests_properties(cli_unit PROPERTIES LABELS unit)
+
+    if(GPT2_BUILD_BENCHMARKS)
+        add_test(
+            NAME generation_benchmark_smoke
+            COMMAND gpt2_generation_benchmark --help
+        )
+        set_tests_properties(generation_benchmark_smoke PROPERTIES
+            LABELS smoke
+            PASS_REGULAR_EXPRESSION "Usage:"
+        )
+    endif()
 
     add_test(
         NAME checkpoint_writer_unit
@@ -376,13 +404,6 @@ if(BUILD_TESTING)
     endif()
 
     if(GPT2_ENABLE_GENERATION_PARITY)
-        add_executable(gpt2_kv_cache_benchmark
-            tests/kv_cache_benchmark.cpp
-        )
-
-        target_link_libraries(gpt2_kv_cache_benchmark PRIVATE gpt2_core)
-        gpt2_enable_warnings(gpt2_kv_cache_benchmark)
-
         get_filename_component(
             GPT2_GENERATION_CHECKPOINT_ABSOLUTE
             "${GPT2_SMALL_CHECKPOINT}"
