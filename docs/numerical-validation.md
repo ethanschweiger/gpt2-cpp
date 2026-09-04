@@ -7,8 +7,9 @@ GPT-2 Small model using the raw token IDs for `Hello, world!`:
 [15496, 11, 995, 0]
 ```
 
-Using token IDs directly keeps tokenizer behavior outside this test. The four
-positions still exercise token embeddings, position embeddings, causal
+Using token IDs directly keeps tokenizer behavior outside this test; the
+tokenizer has its own parity test, described in [Tokenizer](tokenizer.md). The
+four positions still exercise token embeddings, position embeddings, causal
 self-attention, all 12 transformer blocks, the final layer normalization, and
 the tied language-model projection.
 

@@ -21,6 +21,11 @@ option(GPT2_ENABLE_GPT2_SMALL_PARITY
     OFF
 )
 
+option(GPT2_ENABLE_TOKENIZER_PARITY
+    "Enable offline GPT-2 tokenizer parity testing"
+    OFF
+)
+
 set(GPT2_SMALL_CHECKPOINT
     "${PROJECT_SOURCE_DIR}/models/gpt2-small-fp32.bin"
     CACHE FILEPATH
@@ -31,6 +36,18 @@ set(GPT2_SMALL_HF_REFERENCE
     "${PROJECT_SOURCE_DIR}/models/huggingface-cache/hub/models--openai-community--gpt2/snapshots/607a30d783dfa663caf39e06633721c8d4cfcd7e"
     CACHE PATH
     "Path to the matching Hugging Face GPT-2 Small snapshot"
+)
+
+set(GPT2_SMALL_VOCABULARY
+    "${GPT2_SMALL_HF_REFERENCE}/vocab.json"
+    CACHE FILEPATH
+    "Path to the GPT-2 byte-level BPE vocabulary"
+)
+
+set(GPT2_SMALL_MERGES
+    "${GPT2_SMALL_HF_REFERENCE}/merges.txt"
+    CACHE FILEPATH
+    "Path to the GPT-2 byte-level BPE merge rules"
 )
 
 function(gpt2_enable_warnings target_name)
@@ -65,6 +82,7 @@ add_library(gpt2_core STATIC
     src/model.cpp
     src/tensor.cpp
     src/tensor_ops.cpp
+    src/tokenizer.cpp
     src/transformer.cpp
 )
 
@@ -153,6 +171,16 @@ if(BUILD_TESTING)
     add_test(NAME model_unit COMMAND gpt2_model_tests)
     set_tests_properties(model_unit PROPERTIES LABELS unit)
 
+    add_executable(gpt2_tokenizer_tests
+        tests/tokenizer_test.cpp
+    )
+
+    target_link_libraries(gpt2_tokenizer_tests PRIVATE gpt2_core)
+    gpt2_enable_warnings(gpt2_tokenizer_tests)
+
+    add_test(NAME tokenizer_unit COMMAND gpt2_tokenizer_tests)
+    set_tests_properties(tokenizer_unit PROPERTIES LABELS unit)
+
     add_test(
         NAME checkpoint_writer_unit
         COMMAND
@@ -175,12 +203,14 @@ if(BUILD_TESTING)
         ENVIRONMENT "PYTHONPATH=${PROJECT_SOURCE_DIR}/tools"
     )
 
-    if(GPT2_ENABLE_HF_TESTS OR GPT2_ENABLE_GPT2_SMALL_PARITY)
+    if(GPT2_ENABLE_HF_TESTS OR
+       GPT2_ENABLE_GPT2_SMALL_PARITY OR
+       GPT2_ENABLE_TOKENIZER_PARITY)
         execute_process(
             COMMAND
                 "${Python3_EXECUTABLE}"
                 "-c"
-                "import numpy, torch, transformers; from transformers import GPT2Config, GPT2LMHeadModel"
+                "import numpy, regex, torch, transformers; from transformers import GPT2Config, GPT2LMHeadModel, GPT2Tokenizer, GPT2TokenizerFast"
             RESULT_VARIABLE GPT2_HF_IMPORT_RESULT
             ERROR_VARIABLE GPT2_HF_IMPORT_ERROR
             OUTPUT_QUIET
@@ -262,6 +292,74 @@ if(BUILD_TESTING)
                 "HF_HUB_OFFLINE=1;TRANSFORMERS_OFFLINE=1;TOKENIZERS_PARALLELISM=false"
             RUN_SERIAL TRUE
             TIMEOUT 900
+        )
+    endif()
+
+    if(GPT2_ENABLE_TOKENIZER_PARITY)
+        get_filename_component(
+            GPT2_SMALL_VOCABULARY_ABSOLUTE
+            "${GPT2_SMALL_VOCABULARY}"
+            ABSOLUTE
+            BASE_DIR "${PROJECT_SOURCE_DIR}"
+        )
+
+        get_filename_component(
+            GPT2_SMALL_MERGES_ABSOLUTE
+            "${GPT2_SMALL_MERGES}"
+            ABSOLUTE
+            BASE_DIR "${PROJECT_SOURCE_DIR}"
+        )
+
+        if(NOT EXISTS "${GPT2_SMALL_VOCABULARY_ABSOLUTE}")
+            message(FATAL_ERROR
+                "GPT-2 tokenizer vocabulary does not exist: "
+                "${GPT2_SMALL_VOCABULARY_ABSOLUTE}"
+            )
+        endif()
+
+        if(NOT EXISTS "${GPT2_SMALL_MERGES_ABSOLUTE}")
+            message(FATAL_ERROR
+                "GPT-2 tokenizer merges do not exist: "
+                "${GPT2_SMALL_MERGES_ABSOLUTE}"
+            )
+        endif()
+
+        add_executable(gpt2_tokenizer_runner
+            tests/tokenizer_runner.cpp
+        )
+
+        target_link_libraries(gpt2_tokenizer_runner PRIVATE gpt2_core)
+        gpt2_enable_warnings(gpt2_tokenizer_runner)
+
+        add_test(
+            NAME gpt2_tokenizer_parity
+            COMMAND
+                "${Python3_EXECUTABLE}"
+                "${PROJECT_SOURCE_DIR}/tests/tokenizer_parity_test.py"
+                "--runner"
+                "$<TARGET_FILE:gpt2_tokenizer_runner>"
+                "--vocabulary"
+                "${GPT2_SMALL_VOCABULARY_ABSOLUTE}"
+                "--merges"
+                "${GPT2_SMALL_MERGES_ABSOLUTE}"
+        )
+        set_tests_properties(gpt2_tokenizer_parity PROPERTIES
+            LABELS "integration;huggingface;tokenizer"
+            ENVIRONMENT
+                "HF_HUB_OFFLINE=1;TRANSFORMERS_OFFLINE=1;TOKENIZERS_PARALLELISM=false"
+            TIMEOUT 900
+        )
+
+        add_test(
+            NAME gpt2_unicode_ranges_current
+            COMMAND
+                "${Python3_EXECUTABLE}"
+                "${PROJECT_SOURCE_DIR}/tools/generate_unicode_ranges.py"
+                "--check"
+        )
+        set_tests_properties(gpt2_unicode_ranges_current PROPERTIES
+            LABELS "integration;tokenizer"
+            TIMEOUT 300
         )
     endif()
 
