@@ -42,6 +42,7 @@ function(gpt2_enable_warnings target_name)
 endfunction()
 
 add_library(gpt2_core STATIC
+    src/attention.cpp
     src/checkpoint.cpp
     src/layers.cpp
     src/tensor.cpp
@@ -102,6 +103,16 @@ if(BUILD_TESTING)
 
     add_test(NAME layers_unit COMMAND gpt2_layers_tests)
     set_tests_properties(layers_unit PROPERTIES LABELS unit)
+
+    add_executable(gpt2_attention_tests
+        tests/attention_test.cpp
+    )
+
+    target_link_libraries(gpt2_attention_tests PRIVATE gpt2_core)
+    gpt2_enable_warnings(gpt2_attention_tests)
+
+    add_test(NAME attention_unit COMMAND gpt2_attention_tests)
+    set_tests_properties(attention_unit PROPERTIES LABELS unit)
 
     add_test(
         NAME checkpoint_writer_unit

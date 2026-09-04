@@ -1,5 +1,7 @@
 #include "gpt2/tensor_ops.h"
 
+#include <array>
+#include <cmath>
 #include <cstdlib>
 #include <exception>
 #include <iostream>
@@ -14,6 +16,21 @@ int failure_count = 0;
 void expect(bool condition, std::string_view message) {
     if (!condition) {
         std::cerr << "FAIL: " << message << '\n';
+        ++failure_count;
+    }
+}
+
+void expect_near(
+    float actual,
+    float expected,
+    float tolerance,
+    std::string_view message
+) {
+    if (!std::isfinite(actual) ||
+        std::fabs(actual - expected) > tolerance) {
+        std::cerr << "FAIL: " << message
+                  << " (expected " << expected
+                  << ", got " << actual << ")\n";
         ++failure_count;
     }
 }
@@ -198,6 +215,132 @@ void test_invalid_matrix_multiplication() {
     );
 }
 
+void test_matrix_transpose() {
+    const gpt2::Tensor input(
+        {2, 3},
+        std::vector<float>{1.0F, 2.0F, 3.0F, 4.0F, 5.0F, 6.0F}
+    );
+
+    const gpt2::Tensor result = gpt2::transpose(input);
+
+    expect(
+        result.shape() == gpt2::Tensor::Shape{3, 2},
+        "transpose swaps the matrix dimensions"
+    );
+
+    const std::array<float, 6> expected{
+        1.0F, 4.0F,
+        2.0F, 5.0F,
+        3.0F, 6.0F,
+    };
+
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+        expect(
+            result.at(index) == expected[index],
+            "transpose moves each value to the expected position"
+        );
+    }
+
+    expect(input.at(1) == 2.0F, "transpose leaves its input unchanged");
+}
+
+void test_invalid_matrix_transpose() {
+    expect_throws<std::invalid_argument>(
+        [] {
+            const gpt2::Tensor input({3});
+            static_cast<void>(gpt2::transpose(input));
+        },
+        "transpose rejects a rank-1 tensor"
+    );
+
+    expect_throws<std::invalid_argument>(
+        [] {
+            const gpt2::Tensor input({1, 2, 3});
+            static_cast<void>(gpt2::transpose(input));
+        },
+        "transpose rejects a rank-3 tensor"
+    );
+}
+
+void test_stable_row_wise_softmax() {
+    const gpt2::Tensor input(
+        {2, 3},
+        std::vector<float>{
+            1.0F, 2.0F, 3.0F,
+            1000.0F, 1001.0F, 1002.0F,
+        }
+    );
+
+    const gpt2::Tensor result = gpt2::softmax(input);
+
+    expect(
+        result.shape() == input.shape(),
+        "softmax preserves the input shape"
+    );
+
+    const std::array<float, 3> expected{
+        0.0900306F,
+        0.244728F,
+        0.665241F,
+    };
+
+    for (std::size_t row = 0; row < 2; ++row) {
+        float row_sum = 0.0F;
+
+        for (std::size_t column = 0; column < 3; ++column) {
+            const std::size_t index = row * 3 + column;
+
+            expect_near(
+                result.at(index),
+                expected[column],
+                1.0e-5F,
+                "softmax produces the expected probability"
+            );
+            row_sum += result.at(index);
+        }
+
+        expect_near(
+            row_sum,
+            1.0F,
+            1.0e-6F,
+            "each softmax row sums to one"
+        );
+    }
+
+    expect(
+        input.at(3) == 1000.0F,
+        "softmax leaves its input unchanged"
+    );
+}
+
+void test_softmax_uses_final_dimension() {
+    const gpt2::Tensor input(
+        {2, 2, 2},
+        std::vector<float>{
+            1.0F, 1.0F,
+            2.0F, 2.0F,
+            100.0F, 100.0F,
+            -5.0F, -5.0F,
+        }
+    );
+
+    const gpt2::Tensor result = gpt2::softmax(input);
+
+    expect(
+        result.shape() == input.shape(),
+        "softmax preserves a rank-3 shape"
+    );
+
+    for (std::size_t index = 0; index < result.numel(); ++index) {
+        expect_near(
+            result.at(index),
+            0.5F,
+            1.0e-6F,
+            "softmax normalizes each final-dimension pair independently"
+        );
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -208,6 +351,10 @@ int main() {
     test_matrix_by_column_vector();
     test_identity_matrix_multiplication();
     test_invalid_matrix_multiplication();
+    test_matrix_transpose();
+    test_invalid_matrix_transpose();
+    test_stable_row_wise_softmax();
+    test_softmax_uses_final_dimension();
 
     if (failure_count != 0) {
         std::cerr << failure_count << " tensor operation test(s) failed\n";
