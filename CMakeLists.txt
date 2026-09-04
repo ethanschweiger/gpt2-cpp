@@ -47,6 +47,7 @@ add_library(gpt2_core STATIC
     src/layers.cpp
     src/tensor.cpp
     src/tensor_ops.cpp
+    src/transformer.cpp
 )
 
 target_include_directories(gpt2_core PUBLIC include)
@@ -113,6 +114,16 @@ if(BUILD_TESTING)
 
     add_test(NAME attention_unit COMMAND gpt2_attention_tests)
     set_tests_properties(attention_unit PROPERTIES LABELS unit)
+
+    add_executable(gpt2_transformer_tests
+        tests/transformer_test.cpp
+    )
+
+    target_link_libraries(gpt2_transformer_tests PRIVATE gpt2_core)
+    gpt2_enable_warnings(gpt2_transformer_tests)
+
+    add_test(NAME transformer_unit COMMAND gpt2_transformer_tests)
+    set_tests_properties(transformer_unit PROPERTIES LABELS unit)
 
     add_test(
         NAME checkpoint_writer_unit
