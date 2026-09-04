@@ -261,6 +261,18 @@ if(BUILD_TESTING)
             LABELS smoke
             PASS_REGULAR_EXPRESSION "Usage:"
         )
+
+        add_test(
+            NAME record_baseline_smoke
+            COMMAND
+                "${Python3_EXECUTABLE}"
+                "${PROJECT_SOURCE_DIR}/tools/record_baseline.py"
+                "--help"
+        )
+        set_tests_properties(record_baseline_smoke PROPERTIES
+            LABELS smoke
+            PASS_REGULAR_EXPRESSION "usage:"
+        )
     endif()
 
     add_test(

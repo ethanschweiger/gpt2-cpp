@@ -70,6 +70,51 @@ This is a single-threaded CPU inference engine. The reported hardware
 thread count describes the machine; it does not mean the benchmark uses
 that many worker threads.
 
+## Baseline result
+
+Recorded with `tools/record_baseline.py`, which wraps the benchmark's own
+JSON with the checkpoint's SHA-256 and the machine it ran on:
+
+```bash
+.venv/bin/python tools/record_baseline.py \
+  --runner build-benchmark/gpt2_generation_benchmark \
+  --checkpoint models/gpt2-small-fp32.bin \
+  --output benchmarks/results/gpt2-small-release.json \
+  --warmups 2 \
+  --trials 7
+```
+
+### Reproducibility controls
+
+- Checkpoint: `models/gpt2-small-fp32.bin`
+- Checkpoint SHA-256:
+  `c506385a3b29873ef9148a8a5b672b66711a01c2180865ae46449f74cac0d6dc`
+- CPU: Apple M3
+- OS: macOS 15.7.4 (24G517)
+- Compiler: Clang 17.0.0 (clang-1700.0.13.5), Release build
+- Workload: an 8-token synthetic prompt extended by 24 tokens
+- 2 unmeasured warm-up pairs, 7 measured pairs
+
+### Result
+
+```text
+cached median:      3.326 s  (7.22 tokens/s)
+uncached median:    48.389 s (0.50 tokens/s)
+cache speedup:      14.55x
+generated tokens agree between paths: yes (all 7 pairs)
+```
+
+Every measured trial is within 3% of its path's median — 3.26–3.51 s cached,
+48.17–49.72 s uncached — so the speedup is not an artifact of one lucky run.
+The raw per-trial timings, full environment, and checkpoint SHA-256 are
+committed at
+[`benchmarks/results/gpt2-small-release.json`](../benchmarks/results/gpt2-small-release.json).
+
+This machine and workload only: a longer prompt or a different processor
+will change both numbers, though the growing gap between them as context
+length increases is architectural (see
+[Interpreting the result](#interpreting-the-result)), not specific to this run.
+
 ## JSON output
 
 `--json` writes:
@@ -83,8 +128,12 @@ that many worker threads.
 - cache speedup and token-agreement status
 
 The JSON file makes later README tables traceable to raw measurements.
-The final baseline record also includes the CPU model, operating-system
-version and checkpoint SHA-256 gathered alongside the run.
+`tools/record_baseline.py` (used above) runs the benchmark and augments
+this JSON with a `provenance` object — CPU model, operating-system
+version, checkpoint SHA-256, and a UTC timestamp — none of which the
+benchmark binary itself can portably determine. It shells out to
+`sysctl`/`sw_vers` on macOS and `/proc/cpuinfo`/`/etc/os-release` on
+Linux, falling back to Python's `platform` module elsewhere.
 
 ## Interpreting the result
 
