@@ -1,4 +1,5 @@
 #include "gpt2/layers.h"
+#include "gpt2/tensor_ops.h"
 
 #include <algorithm>
 #include <cmath>
@@ -131,6 +132,60 @@ Tensor layer_norm(
             result_data[index] =
                 normalized * weight_data[feature] +
                 bias_data[feature];
+        }
+    }
+
+    return result;
+}
+
+Tensor linear(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor& bias
+) {
+    if (input.rank() != 2 || weight.rank() != 2) {
+        throw std::invalid_argument(
+            "linear input and weight must be rank-2 tensors"
+        );
+    }
+
+    if (bias.rank() != 1) {
+        throw std::invalid_argument(
+            "linear bias must be a rank-1 tensor"
+        );
+    }
+
+    const std::size_t input_feature_count =
+        input.shape()[1];
+    const std::size_t output_feature_count =
+        weight.shape()[1];
+
+    if (weight.shape()[0] != input_feature_count) {
+        throw std::invalid_argument(
+            "linear weight input size does not match the input"
+        );
+    }
+
+    if (bias.numel() != output_feature_count) {
+        throw std::invalid_argument(
+            "linear bias size does not match the output size"
+        );
+    }
+
+    Tensor result = matmul(input, weight);
+
+    float* result_data = result.data();
+    const float* bias_data = bias.data();
+    const std::size_t row_count = input.shape()[0];
+
+    for (std::size_t row = 0; row < row_count; ++row) {
+        for (std::size_t output_feature = 0;
+             output_feature < output_feature_count;
+             ++output_feature) {
+            const std::size_t index =
+                row * output_feature_count + output_feature;
+
+            result_data[index] += bias_data[output_feature];
         }
     }
 

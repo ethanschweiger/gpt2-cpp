@@ -393,6 +393,139 @@ void test_gelu_multidimensional_tensor() {
     );
 }
 
+void test_linear_transformation() {
+    const gpt2::Tensor input(
+        {2, 3},
+        std::vector<float>{
+            1.0F, 2.0F, 3.0F,
+            4.0F, 5.0F, 6.0F,
+        }
+    );
+    const gpt2::Tensor weight(
+        {3, 2},
+        std::vector<float>{
+            1.0F, 2.0F,
+            3.0F, 4.0F,
+            5.0F, 6.0F,
+        }
+    );
+    const gpt2::Tensor bias(
+        {2},
+        std::vector<float>{0.5F, -1.0F}
+    );
+
+    const gpt2::Tensor result =
+        gpt2::linear(input, weight, bias);
+
+    expect(
+        result.shape() == gpt2::Tensor::Shape{2, 2},
+        "linear produces one output row per input row"
+    );
+    const std::array<float, 4> expected{22.5F, 27.0F, 49.5F, 63.0F};
+
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+        expect_near(
+            result.at(index),
+            expected[index],
+            1.0e-5F,
+            "linear computes the expected output value"
+        );
+    }
+
+    expect(input.at(0) == 1.0F, "linear leaves its input unchanged");
+    expect(weight.at(0) == 1.0F, "linear leaves its weight unchanged");
+    expect(bias.at(0) == 0.5F, "linear leaves its bias unchanged");
+}
+
+void test_linear_single_output_feature() {
+    const gpt2::Tensor input(
+        {2, 2},
+        std::vector<float>{1.0F, 2.0F, 3.0F, 4.0F}
+    );
+    const gpt2::Tensor weight(
+        {2, 1},
+        std::vector<float>{2.0F, -1.0F}
+    );
+    const gpt2::Tensor bias(
+        {1},
+        std::vector<float>{3.0F}
+    );
+
+    const gpt2::Tensor result =
+        gpt2::linear(input, weight, bias);
+
+    expect(
+        result.shape() == gpt2::Tensor::Shape{2, 1},
+        "linear supports a single output feature"
+    );
+    expect_near(
+        result.at(0),
+        3.0F,
+        1.0e-5F,
+        "linear adds bias to the first row"
+    );
+    expect_near(
+        result.at(1),
+        5.0F,
+        1.0e-5F,
+        "linear adds bias to the second row"
+    );
+}
+
+void test_invalid_linear_tensor_ranks() {
+    expect_throws<std::invalid_argument>(
+        [] {
+            const gpt2::Tensor input({3});
+            const gpt2::Tensor weight({3, 2});
+            const gpt2::Tensor bias({2});
+            static_cast<void>(gpt2::linear(input, weight, bias));
+        },
+        "linear rejects a non-matrix input"
+    );
+
+    expect_throws<std::invalid_argument>(
+        [] {
+            const gpt2::Tensor input({1, 3});
+            const gpt2::Tensor weight({3});
+            const gpt2::Tensor bias({2});
+            static_cast<void>(gpt2::linear(input, weight, bias));
+        },
+        "linear rejects a non-matrix weight"
+    );
+
+    expect_throws<std::invalid_argument>(
+        [] {
+            const gpt2::Tensor input({1, 3});
+            const gpt2::Tensor weight({3, 2});
+            const gpt2::Tensor bias({1, 2});
+            static_cast<void>(gpt2::linear(input, weight, bias));
+        },
+        "linear rejects a non-vector bias"
+    );
+}
+
+void test_invalid_linear_dimensions() {
+    expect_throws<std::invalid_argument>(
+        [] {
+            const gpt2::Tensor input({2, 3});
+            const gpt2::Tensor weight({4, 2});
+            const gpt2::Tensor bias({2});
+            static_cast<void>(gpt2::linear(input, weight, bias));
+        },
+        "linear rejects an incompatible weight input size"
+    );
+
+    expect_throws<std::invalid_argument>(
+        [] {
+            const gpt2::Tensor input({2, 3});
+            const gpt2::Tensor weight({3, 2});
+            const gpt2::Tensor bias({3});
+            static_cast<void>(gpt2::linear(input, weight, bias));
+        },
+        "linear rejects an incompatible bias size"
+    );
+}
+
 }  // namespace
 
 int main() {
@@ -407,6 +540,10 @@ int main() {
     test_invalid_layer_norm_epsilon();
     test_gelu_known_values();
     test_gelu_multidimensional_tensor();
+    test_linear_transformation();
+    test_linear_single_output_feature();
+    test_invalid_linear_tensor_ranks();
+    test_invalid_linear_dimensions();
 
     if (failure_count != 0) {
         std::cerr << failure_count << " test assertion(s) failed\n";

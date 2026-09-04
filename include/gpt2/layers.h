@@ -19,6 +19,12 @@ Tensor layer_norm(
     float epsilon = 1.0e-5F
 );
 
+Tensor linear(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor& bias
+);
+
 Tensor gelu(const Tensor& input);
 
 }  // namespace gpt2
