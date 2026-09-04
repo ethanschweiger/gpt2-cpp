@@ -6,6 +6,8 @@
 
 namespace gpt2 {
 
+class Gpt2Model;
+
 Tensor causal_scaled_dot_product_attention(
     const Tensor& query,
     const Tensor& key,
@@ -26,16 +28,30 @@ Tensor causal_scaled_dot_product_attention(
 // Keys and values already computed for the tokens seen so far. The
 // tensors are sized for the whole context window and only the first
 // `length` rows hold real values.
-struct AttentionCache {
-    Tensor keys;
-    Tensor values;
-    std::size_t length = 0;
-
+class AttentionCache {
+public:
     AttentionCache(std::size_t capacity, std::size_t embedding_size);
 
+    std::size_t length() const;
     std::size_t capacity() const;
     std::size_t embedding_size() const;
     void clear();
+
+private:
+    friend class Gpt2Model;
+    friend Tensor multi_head_self_attention(
+        const Tensor& input,
+        const Tensor& qkv_weight,
+        const Tensor& qkv_bias,
+        const Tensor& output_weight,
+        const Tensor& output_bias,
+        std::size_t head_count,
+        AttentionCache& cache
+    );
+
+    Tensor keys_m;
+    Tensor values_m;
+    std::size_t length_m = 0;
 };
 
 Tensor multi_head_self_attention(

@@ -55,8 +55,9 @@ struct SamplingOptions {
 // highest-scoring token and breaking ties toward the lower ID. Returns
 // only the appended tokens.
 //
-// Every step re-runs the whole forward pass, so a run costs one forward
-// pass per new token over a sequence that grows by one each time.
+// By default the prompt is processed once and later steps reuse its
+// cached keys and values. Set GenerationLimits::use_cache to false to
+// replay the growing sequence at every step.
 Generation generate_greedy(
     const Gpt2Model& model,
     std::span<const std::size_t> prompt_token_ids,

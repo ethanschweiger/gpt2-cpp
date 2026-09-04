@@ -89,9 +89,11 @@ void expect_throws(Function function, std::string_view message) {
     ++failure_count;
 }
 
-gpt2::Gpt2Model load_fixture_model() {
+gpt2::Gpt2Model load_fixture_model(
+    std::size_t index_multiplier = alternate_index_multiplier
+) {
     const TemporaryCheckpoint file(
-        make_checkpoint(make_model_tensors(alternate_index_multiplier)),
+        make_checkpoint(make_model_tensors(index_multiplier)),
         "gpt2-kv-cache-test-"
     );
     return gpt2::Gpt2Model(gpt2::load_checkpoint(file.path()));
@@ -235,6 +237,33 @@ void test_cache_reports_its_shape() {
     expect(cache.length() == 0, "a new cache is empty");
 }
 
+void test_populated_cache_is_bound_to_its_model() {
+    const gpt2::Gpt2Model first = load_fixture_model();
+    const gpt2::Gpt2Model second = load_fixture_model(
+        gpt2_test::standard_index_multiplier
+    );
+    const std::array<std::size_t, 2> tokens{2, 5};
+
+    gpt2::KvCache cache(first.config());
+    static_cast<void>(first.forward(tokens, cache));
+
+    expect_throws<std::invalid_argument>(
+        [&second, &cache, &tokens] {
+            static_cast<void>(second.forward(tokens, cache));
+        },
+        "a populated cache cannot be mixed with another model"
+    );
+
+    cache.clear();
+    const gpt2::Tensor reused = second.forward(tokens, cache);
+    const gpt2::Tensor fresh = second.forward(tokens);
+    expect_identical_bits(
+        all_of(reused),
+        all_of(fresh),
+        "clearing lets a cache bind to another compatible model"
+    );
+}
+
 void test_cache_rejects_invalid_use() {
     const gpt2::Gpt2Model model = load_fixture_model();
 
@@ -280,7 +309,7 @@ void test_cache_rejects_invalid_use() {
         [&model, &mismatched, &token] {
             static_cast<void>(model.forward(token, mismatched));
         },
-        "a cache built for another model is rejected"
+        "a cache with an incompatible layer count is rejected"
     );
 
     gpt2::ModelConfig narrower = model.config();
@@ -304,6 +333,7 @@ int main() {
         test_mixed_chunk_sizes_match_uncached();
         test_cleared_cache_can_be_reused();
         test_cache_reports_its_shape();
+        test_populated_cache_is_bound_to_its_model();
         test_cache_rejects_invalid_use();
     } catch (const std::exception& exception) {
         std::cerr << "FAIL: unexpected exception: "

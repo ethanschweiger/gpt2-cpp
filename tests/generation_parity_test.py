@@ -20,7 +20,7 @@ EXPECTED_MERGES_SHA256 = (
 EXPECTED_CONTEXT_LENGTH = 1024
 END_OF_TEXT_ID = 50256
 
-# Greedy generation re-runs the whole forward pass for every new token,
+# Every case also exercises the intentionally uncached comparison path,
 # so the prompts stay short and the budgets modest.
 CASES = (
     ("Hello, world!", 12),

@@ -1,4 +1,4 @@
 numpy>=1.26,<3
-regex>=2024.11.6
+regex==2026.9.3
 torch>=2.5,<3
 transformers>=5,<6

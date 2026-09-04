@@ -779,6 +779,15 @@ MergeRanks parse_merges(
             require_alphabet_token(left, merges_description);
             require_alphabet_token(right, merges_description);
 
+            if (token_to_id.find(std::string(left)) == token_to_id.end() ||
+                token_to_id.find(std::string(right)) == token_to_id.end()) {
+                throw std::runtime_error(
+                    "tokenizer merges line " +
+                    std::to_string(line_number) +
+                    " uses a symbol outside the vocabulary"
+                );
+            }
+
             std::string merged;
             merged.reserve(left.size() + right.size());
             merged.append(left);

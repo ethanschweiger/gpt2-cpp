@@ -44,17 +44,18 @@ std::span<const float> last_row(const Tensor& logits) {
 
 std::size_t most_likely_token(std::span<const float> scores) {
     // A strict comparison keeps the lowest ID when scores tie, and
-    // skips any NaN score because every comparison against one fails.
-    std::size_t best_token = 0;
-    float best_score = scores[0];
-    for (std::size_t token = 1; token < scores.size(); ++token) {
-        if (scores[token] > best_score) {
-            best_score = scores[token];
+    // non-finite scores cannot become candidates.
+    std::size_t best_token = scores.size();
+    float best_score = -std::numeric_limits<float>::infinity();
+    for (std::size_t token = 0; token < scores.size(); ++token) {
+        const float score = scores[token];
+        if (std::isfinite(score) && score > best_score) {
+            best_score = score;
             best_token = token;
         }
     }
 
-    if (!std::isfinite(best_score)) {
+    if (best_token == scores.size()) {
         throw std::runtime_error(
             "model produced no finite logit to generate from"
         );

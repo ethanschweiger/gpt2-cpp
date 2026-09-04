@@ -67,6 +67,20 @@ int main(int argument_count, char** arguments) {
             gpt2::load_checkpoint(arguments[1])
         );
 
+        const std::size_t context_length =
+            static_cast<std::size_t>(model.config().context_length);
+        if (prompt_tokens == 0 || prompt_tokens >= context_length) {
+            throw std::invalid_argument(
+                "prompt tokens must be between one and context length "
+                "minus one"
+            );
+        }
+        if (new_tokens == 0) {
+            throw std::invalid_argument(
+                "new tokens must be greater than zero"
+            );
+        }
+
         // An arbitrary but fixed prompt: the benchmark measures speed,
         // and the tokens only have to be inside the vocabulary.
         std::vector<std::size_t> prompt(prompt_tokens);

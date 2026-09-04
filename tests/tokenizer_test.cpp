@@ -757,6 +757,11 @@ void test_loader_rejects_invalid_assets() {
         "#version: 0.2\nh o\n",
         "loader rejects a merge outside the vocabulary"
     );
+    expect_load_failure(
+        valid_vocabulary,
+        "#version: 0.2\nhel lo\n",
+        "loader rejects a merge whose operands are outside the vocabulary"
+    );
 }
 
 void test_loader_accepts_asset_layout_variations() {

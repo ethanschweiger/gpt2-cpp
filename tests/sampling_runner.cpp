@@ -11,6 +11,7 @@
 
 #include "gpt2/generation.h"
 
+#include <array>
 #include <bit>
 #include <cstddef>
 #include <cstdint>

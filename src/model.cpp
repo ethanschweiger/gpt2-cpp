@@ -4,6 +4,7 @@
 #include "gpt2/tensor_ops.h"
 #include "gpt2/transformer.h"
 
+#include <atomic>
 #include <limits>
 #include <numeric>
 #include <stdexcept>
@@ -17,6 +18,11 @@ namespace {
 
 constexpr std::size_t top_level_tensor_count = 4;
 constexpr std::size_t tensors_per_layer = 12;
+
+std::uint64_t next_model_identity() {
+    static std::atomic<std::uint64_t> next{1};
+    return next.fetch_add(1, std::memory_order_relaxed);
+}
 
 std::size_t checked_product(
     std::size_t value,
@@ -279,7 +285,8 @@ Tensor tied_embedding_logits(
 }  // namespace
 
 Gpt2Model::Gpt2Model(Checkpoint checkpoint)
-    : checkpoint_m(std::move(checkpoint)) {
+    : checkpoint_m(std::move(checkpoint)),
+      identity_m(next_model_identity()) {
     validate_checkpoint_schema(checkpoint_m);
 }
 
@@ -321,7 +328,7 @@ KvCache::KvCache(const ModelConfig& config)
 }
 
 std::size_t KvCache::length() const {
-    return layers_m.empty() ? 0 : layers_m.front().length;
+    return layers_m.empty() ? 0 : layers_m.front().length();
 }
 
 std::size_t KvCache::capacity() const {
@@ -336,6 +343,7 @@ void KvCache::clear() {
     for (AttentionCache& layer : layers_m) {
         layer.clear();
     }
+    owner_id_m = 0;
 }
 
 Tensor Gpt2Model::forward(
@@ -404,7 +412,20 @@ Tensor Gpt2Model::forward(
         );
     }
 
+    if (cache.owner_id_m != 0 && cache.owner_id_m != identity_m) {
+        throw std::invalid_argument(
+            "cache contains state from a different model"
+        );
+    }
+
     const std::size_t start = cache.length();
+    for (const AttentionCache& layer : cache.layers_m) {
+        if (layer.length() != start) {
+            throw std::logic_error(
+                "cache layers contain different sequence lengths"
+            );
+        }
+    }
     validate_token_sequence(token_ids, context_length - start);
 
     // The cached tokens already occupy positions 0 through start - 1,
@@ -425,28 +446,37 @@ Tensor Gpt2Model::forward(
     const std::size_t head_count =
         static_cast<std::size_t>(config().head_count);
 
-    for (std::size_t layer = 0; layer < layer_count; ++layer) {
-        const TransformerBlockParameters parameters =
-            bind_block(checkpoint_m, layer);
+    try {
+        for (std::size_t layer = 0; layer < layer_count; ++layer) {
+            const TransformerBlockParameters parameters =
+                bind_block(checkpoint_m, layer);
 
-        hidden_state = transformer_block(
+            hidden_state = transformer_block(
+                hidden_state,
+                parameters,
+                head_count,
+                cache.layers_m[layer]
+            );
+        }
+
+        hidden_state = layer_norm(
             hidden_state,
-            parameters,
-            head_count,
-            cache.layers_m[layer]
+            checkpoint_m.tensor("transformer.ln_f.weight"),
+            checkpoint_m.tensor("transformer.ln_f.bias")
         );
+
+        Tensor logits = tied_embedding_logits(
+            hidden_state,
+            checkpoint_m.tensor("transformer.wte.weight")
+        );
+        cache.owner_id_m = identity_m;
+        return logits;
+    } catch (...) {
+        for (AttentionCache& layer : cache.layers_m) {
+            layer.length_m = start;
+        }
+        throw;
     }
-
-    hidden_state = layer_norm(
-        hidden_state,
-        checkpoint_m.tensor("transformer.ln_f.weight"),
-        checkpoint_m.tensor("transformer.ln_f.bias")
-    );
-
-    return tied_embedding_logits(
-        hidden_state,
-        checkpoint_m.tensor("transformer.wte.weight")
-    );
 }
 
 }  // namespace gpt2

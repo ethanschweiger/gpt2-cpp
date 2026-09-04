@@ -103,8 +103,8 @@ than failing later during encoding:
 - all 256 alphabet characters must be present as single-character
   tokens, which is what makes `encode` total for valid UTF-8
 - every merge rule must be two non-empty symbols separated by one space,
-  must not repeat an earlier rule, and must produce a token that is in
-  the vocabulary
+  both symbols and their merged result must be in the vocabulary, and
+  the rule must not repeat an earlier rule
 - `<|endoftext|>` must be present
 
 A leading `#version:` line in `merges.txt` is skipped. Only that line is

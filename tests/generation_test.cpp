@@ -4,6 +4,7 @@
 
 #include <array>
 #include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -168,7 +169,7 @@ void test_greedy_generation_matches_hugging_face() {
 
 // The continuation of {2, 5, 1} changes between its two steps, so a
 // run that reused the first step's logits would fail these.
-void test_each_step_re_runs_the_forward_pass() {
+void test_each_step_computes_fresh_logits() {
     const gpt2::Gpt2Model model = load_fixture_model();
     const std::array<std::size_t, 3> prompt{2, 5, 1};
 
@@ -343,17 +344,61 @@ void test_generation_rejects_non_finite_logits() {
     );
 }
 
+void test_generation_skips_a_non_finite_first_logit() {
+    std::vector<TensorFixture> tensors =
+        make_model_tensors(alternate_index_multiplier);
+    TensorFixture& token_embeddings =
+        find_tensor(tensors, "transformer.wte.weight");
+    for (std::size_t column = 0;
+         column < gpt2_test::fixture_embedding_size;
+         ++column) {
+        token_embeddings.values[column] =
+            std::bit_cast<float>(std::uint32_t{0x7FC00000});
+    }
+
+    const gpt2::Gpt2Model model = load_model(tensors);
+    const std::array<std::size_t, 1> prompt{1};
+    const gpt2::Tensor logits = model.forward(prompt);
+
+    std::optional<std::size_t> expected_token;
+    float expected_score = 0.0F;
+    for (std::size_t token = 0; token < logits.shape()[1]; ++token) {
+        const float score = logits.at(token);
+        if (std::isfinite(score) &&
+            (!expected_token.has_value() || score > expected_score)) {
+            expected_token = token;
+            expected_score = score;
+        }
+    }
+
+    expect(
+        expected_token.has_value(),
+        "the partial-NaN fixture retains finite logits"
+    );
+    if (!expected_token.has_value()) {
+        return;
+    }
+
+    expect_generation(
+        gpt2::generate_greedy(model, prompt, token_limit(1)),
+        {*expected_token},
+        gpt2::GenerationStop::token_limit,
+        "generation skips a non-finite logit in token slot zero"
+    );
+}
+
 }  // namespace
 
 int main() {
     try {
         test_greedy_generation_matches_hugging_face();
-        test_each_step_re_runs_the_forward_pass();
+        test_each_step_computes_fresh_logits();
         test_cached_and_uncached_generation_agree();
         test_generation_respects_its_limits();
         test_generation_stops_at_the_end_of_text_token();
         test_generation_rejects_invalid_prompts();
         test_generation_rejects_non_finite_logits();
+        test_generation_skips_a_non_finite_first_logit();
     } catch (const std::exception& exception) {
         std::cerr << "FAIL: unexpected exception: "
                   << exception.what() << '\n';

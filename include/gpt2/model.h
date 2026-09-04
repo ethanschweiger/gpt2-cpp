@@ -29,6 +29,7 @@ private:
     std::vector<AttentionCache> layers_m;
     std::uint32_t embedding_size_m;
     std::uint32_t head_count_m;
+    std::uint64_t owner_id_m = 0;
 };
 
 class Gpt2Model {
@@ -47,8 +48,8 @@ public:
 
     // Appends the tokens to the cache and returns the logits for those
     // tokens alone, so a run of length n costs n single-token steps
-    // rather than n growing forward passes. The cache must have been
-    // built from this model's configuration.
+    // rather than n growing forward passes. A populated cache is bound
+    // to the logical model that filled it until clear() is called.
     Tensor forward(
         std::span<const std::size_t> token_ids,
         KvCache& cache
@@ -56,6 +57,7 @@ public:
 
 private:
     Checkpoint checkpoint_m;
+    std::uint64_t identity_m;
 };
 
 }  // namespace gpt2

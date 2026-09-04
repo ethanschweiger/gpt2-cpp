@@ -26,15 +26,16 @@ draw in place of the argmax; see [Sampling](#sampling).
 
 ## How a step works
 
-Each step runs the full forward pass over the whole sequence so far,
-reads the last row of the `[sequence length, vocabulary size]` logits,
-and takes its highest-scoring index. That token is appended to the
-sequence and the next step runs again over the longer sequence.
+The default cached path runs the prompt once, then sends one new token
+through the model at each step while reusing the earlier keys and values.
+The uncached comparison path runs the full forward pass over the growing
+sequence. Both read the last row of the
+`[sequence length, vocabulary size]` logits and take its highest-scoring
+index.
 
-Ties break toward the lower token ID. `NaN` scores are skipped, because
-every comparison against one is false; if no finite score remains, the
-call throws `std::runtime_error` rather than returning an arbitrary
-token.
+Ties break toward the lower token ID. Non-finite scores are skipped; if
+no finite score remains, the call throws `std::runtime_error` rather than
+returning an arbitrary token.
 
 ## Stopping
 
@@ -112,8 +113,10 @@ arbitrary token.
 The uniform draw is taken from the engine directly rather than through
 `std::uniform_real_distribution`, because the C++ standard fixes the
 output of `std::mt19937_64` but not the algorithm any distribution uses
-to consume it. A seed therefore reproduces a run across standard library
-implementations, not only across runs of one binary.
+to consume it. This makes the mapping from engine output to uniform draw
+portable across standard libraries. The full sampled sequence can still
+vary across platforms if math-library rounding moves a cumulative
+probability across a draw boundary.
 
 ### Precision
 
@@ -153,12 +156,18 @@ const gpt2::Tensor next = model.forward(one_token, cache);
 `Gpt2Model::forward` has an overload that appends tokens to a cache and
 returns the logits for those tokens alone. A cache is sized for the
 whole context window at construction and validated against the model's
-configuration on every call, so a cache built for a different model is
-rejected rather than silently producing nonsense.
+configuration on every call. Its first successful forward pass also
+binds it to that logical model, so populated state cannot accidentally
+be mixed with another model's weights. Calling `clear()` removes both the
+sequence and that binding.
 
-Without the cache, generating `n` tokens from a prompt of `p` costs full
-forward passes over `p`, `p + 1`, … — quadratic work. With it, the
-prompt is processed once and each new token costs a single-token step.
+Without the cache, generating `n` tokens from a prompt of `p` repeats
+full forward passes over `p`, `p + 1`, … tokens; attention work across
+those growing passes is cubic in sequence length. With the cache, the
+prompt is processed once and each new token takes a single-token step.
+That step still attends over all earlier keys, so its attention work
+grows linearly with the cached context, but it no longer reprojects or
+runs the MLP for every earlier token.
 
 ### Cost
 
@@ -170,13 +179,15 @@ tokens:
 | without cache | 50.16 s | 2.090 s |
 | with cache | 4.95 s | 0.206 s |
 
-**10.1× faster**, generating identical tokens. The gap widens with
-sequence length, because the uncached cost grows with every step while
-the cached cost does not.
+This preliminary run was **10.1× faster**, generating identical tokens.
+It is a one-run functional benchmark, not yet a stable resume metric:
+timings depend on the machine and run conditions, and the profiling phase
+will add warm-ups, repeated trials, summary statistics and environment
+metadata.
 
-`tests/kv_cache_benchmark.cpp` produces these numbers and fails if the
-two paths disagree, so the measurement cannot drift away from the
-correctness claim.
+`tests/kv_cache_benchmark.cpp` performs this comparison and fails if the
+two paths disagree. A rerun reports timings for the current machine and
+conditions rather than expecting these exact values.
 
 ### Why the two paths agree exactly
 

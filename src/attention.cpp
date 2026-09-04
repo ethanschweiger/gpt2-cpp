@@ -228,8 +228,8 @@ AttentionCache::AttentionCache(
     std::size_t capacity,
     std::size_t embedding_size
 )
-    : keys({capacity, embedding_size}),
-      values({capacity, embedding_size}) {
+    : keys_m({capacity, embedding_size}),
+      values_m({capacity, embedding_size}) {
     if (capacity == 0 || embedding_size == 0) {
         throw std::invalid_argument(
             "an attention cache needs a positive capacity and width"
@@ -237,16 +237,20 @@ AttentionCache::AttentionCache(
     }
 }
 
+std::size_t AttentionCache::length() const {
+    return length_m;
+}
+
 std::size_t AttentionCache::capacity() const {
-    return keys.shape()[0];
+    return keys_m.shape()[0];
 }
 
 std::size_t AttentionCache::embedding_size() const {
-    return keys.shape()[1];
+    return keys_m.shape()[1];
 }
 
 void AttentionCache::clear() {
-    length = 0;
+    length_m = 0;
 }
 
 namespace {
@@ -409,8 +413,8 @@ Tensor multi_head_self_attention(
         );
     }
 
-    if (cache.length > cache.capacity() ||
-        shapes.sequence_length > cache.capacity() - cache.length) {
+    if (cache.length_m > cache.capacity() ||
+        shapes.sequence_length > cache.capacity() - cache.length_m) {
         throw std::invalid_argument(
             "attention cache has no room for the new tokens"
         );
@@ -419,15 +423,15 @@ Tensor multi_head_self_attention(
     const Tensor combined_qkv =
         linear(input, qkv_weight, qkv_bias);
 
-    const std::size_t query_offset = cache.length;
+    const std::size_t query_offset = cache.length_m;
     append_to_cache(
-        cache.keys,
+        cache.keys_m,
         combined_qkv,
         shapes.embedding_size,
         query_offset
     );
     append_to_cache(
-        cache.values,
+        cache.values_m,
         combined_qkv,
         2 * shapes.embedding_size,
         query_offset
@@ -444,13 +448,13 @@ Tensor multi_head_self_attention(
             shapes.head_size
         );
         const Tensor key = extract_cached_head(
-            cache.keys,
+            cache.keys_m,
             head,
             shapes.head_size,
             total
         );
         const Tensor value = extract_cached_head(
-            cache.values,
+            cache.values_m,
             head,
             shapes.head_size,
             total
@@ -467,7 +471,7 @@ Tensor multi_head_self_attention(
         store_head(merged, head_output, head);
     }
 
-    cache.length = total;
+    cache.length_m = total;
     return linear(merged, output_weight, output_bias);
 }
 
