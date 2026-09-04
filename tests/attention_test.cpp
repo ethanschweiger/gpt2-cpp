@@ -223,6 +223,260 @@ void test_attention_rejects_mismatched_shapes() {
     );
 }
 
+void test_multi_head_attention_matches_reference_layout() {
+    const gpt2::Tensor input(
+        {2, 4},
+        std::vector<float>{
+            1.0F, 0.0F, 0.0F, 0.0F,
+            0.0F, 1.0F, 0.0F, 0.0F,
+        }
+    );
+    const gpt2::Tensor qkv_weight(
+        {4, 12},
+        std::vector<float>{
+            1.0F, 2.0F, 3.0F, 4.0F,
+            0.0F, 0.0F, 0.0F, 2.0F,
+            10.0F, 20.0F, 30.0F, 40.0F,
+
+            1.0F, 0.0F, 0.0F, 1.0F,
+            2.0F, 0.0F, 0.0F, 0.0F,
+            50.0F, 60.0F, 70.0F, 80.0F,
+
+            0.0F, 0.0F, 0.0F, 0.0F,
+            0.0F, 0.0F, 0.0F, 0.0F,
+            0.0F, 0.0F, 0.0F, 0.0F,
+
+            0.0F, 0.0F, 0.0F, 0.0F,
+            0.0F, 0.0F, 0.0F, 0.0F,
+            0.0F, 0.0F, 0.0F, 0.0F,
+        }
+    );
+    const gpt2::Tensor qkv_bias({12});
+    const gpt2::Tensor output_weight(
+        {4, 4},
+        std::vector<float>{
+            1.0F, 0.0F, 0.0F, 0.0F,
+            0.0F, 1.0F, 0.0F, 0.0F,
+            0.0F, 0.0F, 1.0F, 0.0F,
+            0.0F, 0.0F, 0.0F, 1.0F,
+        }
+    );
+    const gpt2::Tensor output_bias({4});
+
+    const gpt2::Tensor result =
+        gpt2::multi_head_self_attention(
+            input,
+            qkv_weight,
+            qkv_bias,
+            output_weight,
+            output_bias,
+            2
+        );
+
+    expect(
+        result.shape() == gpt2::Tensor::Shape{2, 4},
+        "multi-head attention preserves the input shape"
+    );
+
+    const std::array<float, 8> expected{
+        10.0F, 20.0F, 30.0F, 40.0F,
+        42.17719F, 52.17719F, 37.82281F, 47.82281F,
+    };
+
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+        expect_near(
+            result.at(index),
+            expected[index],
+            1.0e-4F,
+            "multi-head attention matches the reference result"
+        );
+    }
+
+    expect(input.at(0) == 1.0F, "multi-head attention leaves input unchanged");
+    expect(
+        qkv_weight.at(0) == 1.0F,
+        "multi-head attention leaves QKV weight unchanged"
+    );
+    expect(
+        output_weight.at(0) == 1.0F,
+        "multi-head attention leaves output weight unchanged"
+    );
+}
+
+void test_multi_head_attention_applies_biases_and_output_projection() {
+    const gpt2::Tensor input({1, 2});
+    const gpt2::Tensor qkv_weight({2, 6});
+    const gpt2::Tensor qkv_bias(
+        {6},
+        std::vector<float>{0.0F, 0.0F, 0.0F, 0.0F, 2.0F, 3.0F}
+    );
+    const gpt2::Tensor output_weight(
+        {2, 2},
+        std::vector<float>{1.0F, 2.0F, 3.0F, 4.0F}
+    );
+    const gpt2::Tensor output_bias(
+        {2},
+        std::vector<float>{0.5F, -1.0F}
+    );
+
+    const gpt2::Tensor result =
+        gpt2::multi_head_self_attention(
+            input,
+            qkv_weight,
+            qkv_bias,
+            output_weight,
+            output_bias,
+            2
+        );
+
+    expect_near(
+        result.at(0),
+        11.5F,
+        1.0e-5F,
+        "multi-head attention applies the output projection"
+    );
+    expect_near(
+        result.at(1),
+        15.0F,
+        1.0e-5F,
+        "multi-head attention applies QKV and output biases"
+    );
+}
+
+void expect_invalid_multi_head_attention(
+    const gpt2::Tensor& input,
+    const gpt2::Tensor& qkv_weight,
+    const gpt2::Tensor& qkv_bias,
+    const gpt2::Tensor& output_weight,
+    const gpt2::Tensor& output_bias,
+    std::size_t head_count,
+    std::string_view message
+) {
+    expect_throws<std::invalid_argument>(
+        [&] {
+            static_cast<void>(gpt2::multi_head_self_attention(
+                input,
+                qkv_weight,
+                qkv_bias,
+                output_weight,
+                output_bias,
+                head_count
+            ));
+        },
+        message
+    );
+}
+
+void test_multi_head_attention_rejects_invalid_configuration() {
+    const gpt2::Tensor input({1, 2});
+    const gpt2::Tensor qkv_weight({2, 6});
+    const gpt2::Tensor qkv_bias({6});
+    const gpt2::Tensor output_weight({2, 2});
+    const gpt2::Tensor output_bias({2});
+
+    expect_invalid_multi_head_attention(
+        input,
+        qkv_weight,
+        qkv_bias,
+        output_weight,
+        output_bias,
+        0,
+        "multi-head attention rejects zero heads"
+    );
+
+    const gpt2::Tensor vector_input({2});
+    expect_invalid_multi_head_attention(
+        vector_input,
+        qkv_weight,
+        qkv_bias,
+        output_weight,
+        output_bias,
+        1,
+        "multi-head attention rejects a non-matrix input"
+    );
+
+    const gpt2::Tensor three_feature_input({1, 3});
+    const gpt2::Tensor three_feature_qkv_weight({3, 9});
+    const gpt2::Tensor three_feature_qkv_bias({9});
+    const gpt2::Tensor three_feature_output_weight({3, 3});
+    const gpt2::Tensor three_feature_output_bias({3});
+    expect_invalid_multi_head_attention(
+        three_feature_input,
+        three_feature_qkv_weight,
+        three_feature_qkv_bias,
+        three_feature_output_weight,
+        three_feature_output_bias,
+        2,
+        "multi-head attention rejects a nondivisible head count"
+    );
+
+    const gpt2::Tensor bad_qkv_weight({2, 5});
+    expect_invalid_multi_head_attention(
+        input,
+        bad_qkv_weight,
+        qkv_bias,
+        output_weight,
+        output_bias,
+        1,
+        "multi-head attention rejects an incorrect QKV weight shape"
+    );
+
+    const gpt2::Tensor bad_qkv_bias({5});
+    expect_invalid_multi_head_attention(
+        input,
+        qkv_weight,
+        bad_qkv_bias,
+        output_weight,
+        output_bias,
+        1,
+        "multi-head attention rejects an incorrect QKV bias size"
+    );
+
+    const gpt2::Tensor matrix_qkv_bias({1, 6});
+    expect_invalid_multi_head_attention(
+        input,
+        qkv_weight,
+        matrix_qkv_bias,
+        output_weight,
+        output_bias,
+        1,
+        "multi-head attention rejects a non-vector QKV bias"
+    );
+
+    const gpt2::Tensor bad_output_weight({2, 3});
+    expect_invalid_multi_head_attention(
+        input,
+        qkv_weight,
+        qkv_bias,
+        bad_output_weight,
+        output_bias,
+        1,
+        "multi-head attention rejects an incorrect output weight shape"
+    );
+
+    const gpt2::Tensor bad_output_bias({3});
+    expect_invalid_multi_head_attention(
+        input,
+        qkv_weight,
+        qkv_bias,
+        output_weight,
+        bad_output_bias,
+        1,
+        "multi-head attention rejects an incorrect output bias size"
+    );
+
+    const gpt2::Tensor matrix_output_bias({1, 2});
+    expect_invalid_multi_head_attention(
+        input,
+        qkv_weight,
+        qkv_bias,
+        output_weight,
+        matrix_output_bias,
+        1,
+        "multi-head attention rejects a non-vector output bias"
+    );
+}
+
 }  // namespace
 
 int main() {
@@ -230,6 +484,9 @@ int main() {
     test_attention_scales_scores();
     test_attention_rejects_invalid_ranks();
     test_attention_rejects_mismatched_shapes();
+    test_multi_head_attention_matches_reference_layout();
+    test_multi_head_attention_applies_biases_and_output_projection();
+    test_multi_head_attention_rejects_invalid_configuration();
 
     if (failure_count != 0) {
         std::cerr << failure_count << " attention test assertion(s) failed\n";
