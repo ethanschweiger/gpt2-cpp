@@ -1,14 +1,13 @@
 # GPT2CPP
 
-GPT2CPP is a from-scratch C++20 CPU inference engine for GPT-2 Small
-(124,439,808 parameters). I built it to understand what happens between a
-trained model checkpoint and the text that comes back out: tensor storage,
-transformer layers, tokenization, decoding, caching and quantization are all
-implemented in the project rather than hidden behind a framework.
+GPT2CPP is a C++20 CPU inference engine for GPT-2 Small (124,439,808
+parameters). It loads a compact binary checkpoint, runs the transformer
+forward pass and generates text from a prompt. It supports both FP32 and
+weights-only int8 checkpoints.
 
-It is small enough to study, but complete enough to run real GPT-2
-checkpoints, compare against reference behavior and measure the tradeoffs
-between FP32 and weights-only int8 inference.
+The project makes the full inference path easy to follow: tensor storage,
+transformer layers, tokenization, generation, KV caching and quantization
+are all implemented here and covered by tests and benchmarks.
 
 ## Features
 
