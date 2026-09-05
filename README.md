@@ -1,5 +1,7 @@
 # GPT2CPP
 
+[![CI](https://github.com/ethanschweiger/gpt2-cpp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ethanschweiger/gpt2-cpp/actions/workflows/ci.yml)
+
 GPT2CPP is a C++20 CPU inference engine for GPT-2 Small (124,439,808
 parameters). It loads a compact binary checkpoint, runs the transformer
 forward pass and generates text from a prompt. It supports both FP32 and
