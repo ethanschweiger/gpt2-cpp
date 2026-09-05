@@ -1,16 +1,16 @@
 # GPT2CPP
 
 GPT2CPP is a from-scratch C++20 CPU inference engine for GPT-2 Small
-(124,439,808 parameters). It loads a compact binary checkpoint, runs the
-transformer forward pass, tokenizes and generates text, and supports both
-FP32 and weights-only int8 checkpoints.
+(124,439,808 parameters). I built it to understand what happens between a
+trained model checkpoint and the text that comes back out: tensor storage,
+transformer layers, tokenization, decoding, caching and quantization are all
+implemented in the project rather than hidden behind a framework.
 
-The project is intentionally built as an engineering system rather than a
-single demo: tensor primitives, checkpoint I/O, tokenizer behavior, model
-layers, generation controls, KV caching, quantization, correctness tests and
-benchmarks are separate, testable pieces.
+It is small enough to study, but complete enough to run real GPT-2
+checkpoints, compare against reference behavior and measure the tradeoffs
+between FP32 and weights-only int8 inference.
 
-## What it supports
+## Features
 
 - C++20, CMake and AppleClang/Clang/GCC builds
 - GPT-2 byte-level BPE tokenization
@@ -108,9 +108,9 @@ uncached throughput and methodology are in
 [docs/quantization.md](docs/quantization.md) and
 [benchmarks/results/quantization-benchmark.json](benchmarks/results/quantization-benchmark.json).
 
-## Architecture
+## How it works
 
-The runtime is layered so each boundary can be validated independently:
+The runtime is split into a few straightforward layers:
 
 1. `Tensor` and tensor operations provide shape-safe contiguous storage and
    matrix primitives.
@@ -120,7 +120,7 @@ The runtime is layered so each boundary can be validated independently:
 4. `Gpt2Model` composes the 12-layer model and owns KV-cache execution.
 5. The tokenizer and generation APIs expose text and token-level inference.
 
-See the focused design notes in [docs/](docs/), especially
+The focused design notes in [docs/](docs/) cover
 [generation.md](docs/generation.md), [checkpoint-format.md](docs/checkpoint-format.md),
 and [quantization.md](docs/quantization.md).
 
@@ -138,13 +138,13 @@ build directories and Python environments are intentionally excluded from
 version control; source code, tests, benchmark methodology and measured JSON
 results are tracked.
 
-## Resume-sized summary
+## Project highlights
 
 - Built a C++20 GPT-2 Small inference engine from tensor primitives through
   tokenizer and generation APIs.
-- Implemented and tested incremental KV caching with exact cached/uncached
-  generation parity.
-- Added weights-only per-channel int8 checkpoint export, loading and runtime
-  execution, with reproducible accuracy, memory and throughput measurements.
+- Implemented incremental KV caching and verified that cached and uncached
+  decoding produce identical token sequences.
+- Added weights-only per-channel int8 export, loading and runtime support,
+  then measured its accuracy, memory and throughput tradeoffs.
 - Reduced the GPT-2 Small checkpoint from 497.8 MB FP32 to 127.7 MB with full
-  int8 storage, while measuring the associated accuracy and runtime tradeoffs.
+  int8 storage while documenting the associated accuracy and runtime costs.
