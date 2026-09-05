@@ -137,6 +137,8 @@ build directories and Python environments are intentionally excluded from
 version control; source code, tests, benchmark methodology and measured JSON
 results are tracked.
 
+The current milestone is summarized in [CHANGELOG.md](CHANGELOG.md).
+
 ## Project highlights
 
 - Built a C++20 GPT-2 Small inference engine from tensor primitives through
