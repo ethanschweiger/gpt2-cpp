@@ -94,6 +94,9 @@ place that already knows, independent of quantization, what shape `<name>`
 is supposed to have. The scale record may appear before or after its INT8
 tensor in the file; the loader accepts either order.
 
+See [Quantization](quantization.md) for GPT-2's own per-tensor axis choices
+and how `tools/export_gpt2.py` produces an INT8 checkpoint.
+
 A checkpoint may freely mix FP32 and INT8 tensors. A given tensor name is
 one or the other, never both, and `<name>.quant_scale` is always FP32
 regardless of what `<name>` is.

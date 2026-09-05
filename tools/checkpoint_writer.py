@@ -11,11 +11,12 @@ VERSION = 1
 HEADER_SIZE = 64
 ENDIAN_MARKER = 0x01020304
 FLOAT32 = 1
+INT8 = 2
 
 GLOBAL_HEADER = struct.Struct("<8s14I")
 TENSOR_HEADER = struct.Struct("<IIIIQQ")
 
-_FLOAT32_SIZE = 4
+_BYTES_PER_ELEMENT = {FLOAT32: 4, INT8: 1}
 _UINT32_MAX = (1 << 32) - 1
 _UINT64_MAX = (1 << 64) - 1
 
@@ -34,6 +35,7 @@ class TensorRecord:
     name: str
     shape: tuple[int, ...]
     payload: bytes | memoryview
+    dtype: int = FLOAT32
 
 
 @dataclass(frozen=True)
@@ -42,6 +44,7 @@ class _PreparedTensor:
     shape: tuple[int, ...]
     payload: memoryview
     element_count: int
+    dtype: int
 
 
 def _require_positive_uint32(value: int, field_name: str) -> None:
@@ -68,7 +71,7 @@ def _validate_model_config(config: ModelConfig) -> None:
         raise ValueError("embedding size must be divisible by head count")
 
 
-def _checked_element_count(shape: tuple[int, ...]) -> int:
+def _checked_element_count(shape: tuple[int, ...], bytes_per_element: int) -> int:
     if not shape:
         raise ValueError("tensor shape must have at least one dimension")
 
@@ -89,7 +92,7 @@ def _checked_element_count(shape: tuple[int, ...]) -> int:
 
         element_count *= dimension
 
-    if element_count > _UINT64_MAX // _FLOAT32_SIZE:
+    if element_count > _UINT64_MAX // bytes_per_element:
         raise OverflowError("tensor payload size overflows uint64")
 
     return element_count
@@ -109,26 +112,40 @@ def _prepare_tensors(tensors: Sequence[TensorRecord]) -> list[_PreparedTensor]:
         if tensor.name in names:
             raise ValueError(f"duplicate tensor name: {tensor.name}")
 
+        if tensor.dtype not in _BYTES_PER_ELEMENT:
+            raise ValueError(
+                f"tensor {tensor.name} has an unsupported dtype: {tensor.dtype}"
+            )
+
         names.add(tensor.name)
         name = tensor.name.encode("utf-8")
 
         if len(name) > _UINT32_MAX:
             raise ValueError("tensor name length does not fit in uint32")
 
+        bytes_per_element = _BYTES_PER_ELEMENT[tensor.dtype]
         shape = tuple(tensor.shape)
-        element_count = _checked_element_count(shape)
+        element_count = _checked_element_count(shape, bytes_per_element)
 
         try:
             payload = memoryview(tensor.payload).cast("B")
         except (TypeError, ValueError) as error:
             raise ValueError("tensor payload must be contiguous bytes") from error
 
-        expected_size = element_count * _FLOAT32_SIZE
+        expected_size = element_count * bytes_per_element
         if payload.nbytes != expected_size:
             raise ValueError(
                 f"tensor {tensor.name} requires {expected_size} payload bytes, "
                 f"received {payload.nbytes}"
             )
+
+        if tensor.dtype == INT8:
+            for byte in payload:
+                if byte == 0x80:
+                    raise ValueError(
+                        f"tensor {tensor.name} contains a value with no "
+                        "symmetric-quantization counterpart: -128"
+                    )
 
         prepared.append(
             _PreparedTensor(
@@ -136,6 +153,7 @@ def _prepare_tensors(tensors: Sequence[TensorRecord]) -> list[_PreparedTensor]:
                 shape=shape,
                 payload=payload,
                 element_count=element_count,
+                dtype=tensor.dtype,
             )
         )
 
@@ -178,7 +196,7 @@ def write_checkpoint(
             output.write(
                 TENSOR_HEADER.pack(
                     len(tensor.name),
-                    FLOAT32,
+                    tensor.dtype,
                     len(tensor.shape),
                     0,
                     tensor.element_count,

@@ -159,3 +159,9 @@ earlier tokens' projections and MLP layers.
 [Profiling](profiling.md) breaks down where this run's time actually
 went, both cached and uncached, and names the concrete target for the
 next optimization pass.
+
+[Quantization](quantization.md) covers a different kind of optimization:
+storing four of the per-layer weight matrices, and optionally the tied
+embedding, as int8 instead of FP32. Its checkpoint-size results are
+already measured; the accuracy and speed sides of that comparison are
+recorded here once the model can run those checkpoints.

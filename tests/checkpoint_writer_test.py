@@ -4,6 +4,7 @@ from pathlib import Path
 import unittest
 
 from checkpoint_writer import (
+    INT8,
     ModelConfig,
     TensorRecord,
     write_checkpoint,
@@ -15,6 +16,7 @@ EXPECTED_VERSION = 1
 EXPECTED_HEADER_SIZE = 64
 EXPECTED_ENDIAN_MARKER = 0x01020304
 EXPECTED_FLOAT32 = 1
+EXPECTED_INT8 = 2
 
 EXPECTED_GLOBAL_HEADER = struct.Struct("<8s14I")
 EXPECTED_TENSOR_HEADER = struct.Struct("<IIIIQQ")
@@ -22,6 +24,10 @@ EXPECTED_TENSOR_HEADER = struct.Struct("<IIIIQQ")
 
 def fp32_payload(*values: float) -> bytes:
     return struct.pack(f"<{len(values)}f", *values)
+
+
+def int8_payload(*values: int) -> bytes:
+    return struct.pack(f"<{len(values)}b", *values)
 
 
 class CheckpointWriterTest(unittest.TestCase):
@@ -197,6 +203,92 @@ class CheckpointWriterTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output_path = Path(directory) / "name.bin"
             with self.assertRaisesRegex(ValueError, "must not be empty"):
+                write_checkpoint(output_path, self.config, [tensor])
+            self.assertFalse(output_path.exists())
+
+    def test_writes_int8_tensor_and_its_scale(self) -> None:
+        tensors = [
+            TensorRecord(
+                "weight",
+                (2, 3),
+                int8_payload(1, -127, 0, 64, -64, 127),
+                dtype=INT8,
+            ),
+            TensorRecord(
+                "weight.quant_scale",
+                (3,),
+                fp32_payload(0.5, 1.0, 2.0),
+            ),
+        ]
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "quantized.bin"
+            write_checkpoint(output_path, self.config, tensors)
+            contents = output_path.read_bytes()
+
+        offset = EXPECTED_GLOBAL_HEADER.size
+        weight_header = EXPECTED_TENSOR_HEADER.unpack_from(contents, offset)
+        self.assertEqual(weight_header, (6, EXPECTED_INT8, 2, 0, 6, 6))
+        offset += EXPECTED_TENSOR_HEADER.size
+
+        dimensions = struct.unpack_from("<2Q", contents, offset)
+        self.assertEqual(dimensions, (2, 3))
+        offset += struct.calcsize("<2Q")
+
+        self.assertEqual(contents[offset : offset + 6], b"weight")
+        offset += 6
+
+        payload = contents[offset : offset + 6]
+        self.assertEqual(struct.unpack("<6b", payload), (1, -127, 0, 64, -64, 127))
+        offset += 6
+
+        scale_name = b"weight.quant_scale"
+        scale_header = EXPECTED_TENSOR_HEADER.unpack_from(contents, offset)
+        self.assertEqual(
+            scale_header,
+            (len(scale_name), EXPECTED_FLOAT32, 1, 0, 3, 12),
+        )
+        offset += EXPECTED_TENSOR_HEADER.size
+        offset += struct.calcsize("<Q")
+        self.assertEqual(contents[offset : offset + len(scale_name)], scale_name)
+        offset += len(scale_name)
+        self.assertEqual(
+            struct.unpack_from("<3f", contents, offset),
+            (0.5, 1.0, 2.0),
+        )
+        offset += struct.calcsize("<3f")
+
+        self.assertEqual(offset, len(contents))
+
+    def test_rejects_incorrect_int8_payload_size(self) -> None:
+        tensor = TensorRecord("weight", (2, 2), int8_payload(1, 2, 3), dtype=INT8)
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "payload.bin"
+            with self.assertRaisesRegex(ValueError, "requires 4"):
+                write_checkpoint(output_path, self.config, [tensor])
+            self.assertFalse(output_path.exists())
+
+    def test_rejects_int8_value_with_no_symmetric_counterpart(self) -> None:
+        tensor = TensorRecord(
+            "weight",
+            (2,),
+            int8_payload(0, -128),
+            dtype=INT8,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "unsigned.bin"
+            with self.assertRaisesRegex(ValueError, "-128"):
+                write_checkpoint(output_path, self.config, [tensor])
+            self.assertFalse(output_path.exists())
+
+    def test_rejects_unsupported_dtype(self) -> None:
+        tensor = TensorRecord("weight", (1,), b"\x00\x00\x00\x00", dtype=99)
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "dtype.bin"
+            with self.assertRaisesRegex(ValueError, "unsupported dtype"):
                 write_checkpoint(output_path, self.config, [tensor])
             self.assertFalse(output_path.exists())
 

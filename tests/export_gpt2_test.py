@@ -8,12 +8,15 @@ import struct
 import tempfile
 import unittest
 
-from checkpoint_writer import ModelConfig
+import numpy as np
+
+from checkpoint_writer import INT8, ModelConfig
 from export_gpt2 import (
     collect_tensor_records,
     expected_tensor_specs,
     export_model,
     model_config_from_hf,
+    quantize_per_channel,
 )
 
 
@@ -293,6 +296,264 @@ class ExportGpt2Test(unittest.TestCase):
         self.assertEqual(summary.file_size, len(contents))
         self.assertEqual(struct.unpack_from("<I", contents, 24), (16,))
         self.assertGreater(summary.parameter_count, 0)
+
+
+def _reference_quantize_per_channel(
+    weights: list[list[float]],
+    axis: int,
+) -> tuple[list[list[int]], list[float]]:
+    """An intentionally naive, un-vectorized restatement of the
+    symmetric per-channel scheme, used to check quantize_per_channel
+    without sharing any of its code. Only handles the rank-2 case,
+    which is all this project's real weight tensors ever are."""
+    row_count = len(weights)
+    column_count = len(weights[0])
+
+    if axis == 1:
+        channel_count = column_count
+        channel_values = [
+            [weights[row][column] for row in range(row_count)]
+            for column in range(channel_count)
+        ]
+    else:
+        channel_count = row_count
+        channel_values = [list(weights[row]) for row in range(channel_count)]
+
+    scale = []
+    quantized_channels = []
+    for values in channel_values:
+        max_abs = max(abs(value) for value in values)
+        channel_scale = max_abs / 127.0 if max_abs > 0.0 else 0.0
+        divisor = channel_scale if channel_scale > 0.0 else 1.0
+        quantized_channels.append(
+            [
+                max(-127, min(127, round(value / divisor)))
+                for value in values
+            ]
+        )
+        scale.append(channel_scale)
+
+    quantized = [[0] * column_count for _ in range(row_count)]
+    for channel_index, values in enumerate(quantized_channels):
+        for position, value in enumerate(values):
+            if axis == 1:
+                quantized[position][channel_index] = value
+            else:
+                quantized[channel_index][position] = value
+
+    return quantized, scale
+
+
+class QuantizePerChannelTest(unittest.TestCase):
+    def test_matches_an_independent_reference_implementation(self) -> None:
+        weights = np.array(
+            [
+                [57.0, 58.0, -59.0, 60.0],
+                [69.0, -70.0, 71.0, 72.0],
+                [81.0, 82.0, 83.0, -84.0],
+                [-93.0, 94.0, 95.0, 96.0],
+            ],
+            dtype=np.float32,
+        )
+
+        for axis in (0, 1):
+            with self.subTest(axis=axis):
+                quantized, scale = quantize_per_channel(weights, axis)
+                expected_quantized, expected_scale = (
+                    _reference_quantize_per_channel(weights.tolist(), axis)
+                )
+
+                self.assertEqual(quantized.dtype, np.dtype(np.int8))
+                self.assertEqual(quantized.tolist(), expected_quantized)
+                np.testing.assert_allclose(
+                    scale, expected_scale, rtol=0, atol=1e-6
+                )
+
+    def test_channel_maximum_quantizes_to_the_boundary(self) -> None:
+        weights = np.array([[10.0, -20.0], [30.0, -40.0]], dtype=np.float32)
+
+        quantized, scale = quantize_per_channel(weights, axis=1)
+
+        # Column 0's largest magnitude is 30, column 1's is 40; each
+        # column's own maximum must land on exactly +-127, never one
+        # short (126) or one over into the unrepresentable -128.
+        self.assertEqual(quantized[1, 0], 127)
+        self.assertEqual(quantized[1, 1], -127)
+        np.testing.assert_allclose(scale, [30.0 / 127.0, 40.0 / 127.0])
+
+    def test_all_zero_channel_quantizes_to_zero_without_dividing_by_zero(
+        self,
+    ) -> None:
+        weights = np.array(
+            [[0.0, 5.0], [0.0, -5.0]],
+            dtype=np.float32,
+        )
+
+        quantized, scale = quantize_per_channel(weights, axis=1)
+
+        self.assertEqual(quantized[:, 0].tolist(), [0, 0])
+        self.assertEqual(scale[0], 0.0)
+
+        # Column 1's own values set its scale, so they occupy the full
+        # int8 range regardless of their absolute magnitude -- the same
+        # boundary behaviour as test_channel_maximum_quantizes_to_the_
+        # boundary above, not a smaller, "gentler" quantization just
+        # because 5.0 looks like a small number in isolation.
+        self.assertEqual(quantized[:, 1].tolist(), [127, -127])
+
+    def test_dequantized_values_stay_within_half_a_scale_step(self) -> None:
+        rng = np.random.default_rng(20260905)
+        weights = rng.normal(scale=3.0, size=(11, 7)).astype(np.float32)
+
+        for axis in (0, 1):
+            with self.subTest(axis=axis):
+                quantized, scale = quantize_per_channel(weights, axis)
+                broadcast_shape = [1, 1]
+                broadcast_shape[axis] = weights.shape[axis]
+                dequantized = quantized.astype(np.float64) * scale.reshape(
+                    broadcast_shape
+                )
+
+                tolerance = (scale / 2.0).reshape(broadcast_shape) + 1e-9
+                error = np.abs(dequantized - weights)
+                self.assertTrue(
+                    bool(np.all(error <= np.broadcast_to(tolerance, error.shape))),
+                    "a dequantized value exceeded half its channel's scale",
+                )
+
+    def test_rejects_an_axis_outside_the_tensor_rank(self) -> None:
+        weights = np.zeros((2, 3), dtype=np.float32)
+
+        with self.assertRaises(ValueError):
+            quantize_per_channel(weights, axis=2)
+
+
+class QuantizedExportTest(unittest.TestCase):
+    def test_transformer_weights_quantize_with_the_output_channel_axis(
+        self,
+    ) -> None:
+        model = make_model()
+        _, records = collect_tensor_records(
+            model,
+            encode_tensor=fake_encode,
+            tensors_equal=fake_equal,
+            quantize_transformer_weights=True,
+        )
+        records_by_name = {record.name: record for record in records}
+
+        c_attn = records_by_name["transformer.h.0.attn.c_attn.weight"]
+        self.assertEqual(c_attn.dtype, INT8)
+        self.assertEqual(len(c_attn.payload), 4 * 12)
+
+        c_attn_scale = records_by_name[
+            "transformer.h.0.attn.c_attn.weight.quant_scale"
+        ]
+        self.assertEqual(c_attn_scale.shape, (12,))
+        self.assertEqual(len(c_attn_scale.payload), 12 * 4)
+
+        for role, out_features in (
+            ("attn.c_attn.weight", 12),
+            ("attn.c_proj.weight", 4),
+            ("mlp.c_fc.weight", 16),
+            ("mlp.c_proj.weight", 4),
+        ):
+            name = f"transformer.h.0.{role}"
+            with self.subTest(role=role):
+                self.assertEqual(records_by_name[name].dtype, INT8)
+                self.assertEqual(
+                    records_by_name[f"{name}.quant_scale"].shape,
+                    (out_features,),
+                )
+
+        # Biases, LayerNorm and position embeddings are never
+        # quantized, and neither is the tied embedding unless
+        # separately requested.
+        for name in (
+            "transformer.wte.weight",
+            "transformer.wpe.weight",
+            "transformer.h.0.ln_1.weight",
+            "transformer.h.0.ln_1.bias",
+            "transformer.h.0.attn.c_attn.bias",
+            "transformer.h.0.attn.c_proj.bias",
+            "transformer.h.0.mlp.c_fc.bias",
+            "transformer.h.0.mlp.c_proj.bias",
+            "transformer.ln_f.weight",
+            "transformer.ln_f.bias",
+        ):
+            with self.subTest(name=name):
+                self.assertNotIn(f"{name}.quant_scale", records_by_name)
+                self.assertNotEqual(records_by_name[name].dtype, INT8)
+
+    def test_tied_embedding_quantizes_with_the_vocabulary_axis(self) -> None:
+        model = make_model()
+        _, records = collect_tensor_records(
+            model,
+            encode_tensor=fake_encode,
+            tensors_equal=fake_equal,
+            quantize_transformer_weights=True,
+            quantize_tied_embedding=True,
+        )
+        records_by_name = {record.name: record for record in records}
+
+        wte = records_by_name["transformer.wte.weight"]
+        self.assertEqual(wte.dtype, INT8)
+        self.assertEqual(wte.shape, (8, 4))
+
+        # The tied embedding's channel axis is the vocabulary (its
+        # rows), not its embedding width (its columns) -- the opposite
+        # of every other quantized weight in this model, because it is
+        # read row-wise for both embedding lookup and the tied LM-head
+        # projection. A scale of length 4 here (the embedding width)
+        # instead of 8 would mean the wrong axis was quantized.
+        wte_scale = records_by_name["transformer.wte.weight.quant_scale"]
+        self.assertEqual(wte_scale.shape, (8,))
+
+    def test_tied_embedding_stays_fp32_without_the_flag(self) -> None:
+        model = make_model()
+        _, records = collect_tensor_records(
+            model,
+            encode_tensor=fake_encode,
+            tensors_equal=fake_equal,
+            quantize_transformer_weights=True,
+            quantize_tied_embedding=False,
+        )
+        records_by_name = {record.name: record for record in records}
+
+        self.assertNotEqual(records_by_name["transformer.wte.weight"].dtype, INT8)
+        self.assertNotIn(
+            "transformer.wte.weight.quant_scale", records_by_name
+        )
+
+    def test_quantized_export_round_trips_through_the_binary_writer(
+        self,
+    ) -> None:
+        model = make_model()
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "quantized-gpt2.bin"
+            summary = export_model(
+                model,
+                output_path,
+                encode_tensor=fake_encode,
+                tensors_equal=fake_equal,
+                quantize_transformer_weights=True,
+                quantize_tied_embedding=True,
+            )
+            fp32_summary = export_model(
+                model,
+                Path(directory) / "fp32-gpt2.bin",
+                encode_tensor=fake_encode,
+                tensors_equal=fake_equal,
+            )
+
+        # Four transformer weights per layer plus the tied embedding
+        # are quantized; each gains one extra record for its scale.
+        self.assertEqual(summary.tensor_count, fp32_summary.tensor_count + 5)
+        # The two exports represent the same trained model, so this
+        # count must not drift just because some weights are stored
+        # differently.
+        self.assertEqual(summary.parameter_count, fp32_summary.parameter_count)
+        self.assertLess(summary.file_size, fp32_summary.file_size)
 
 
 if __name__ == "__main__":
