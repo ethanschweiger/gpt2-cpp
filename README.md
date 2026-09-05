@@ -5,9 +5,9 @@ parameters). It loads a compact binary checkpoint, runs the transformer
 forward pass and generates text from a prompt. It supports both FP32 and
 weights-only int8 checkpoints.
 
-The project makes the full inference path easy to follow: tensor storage,
-transformer layers, tokenization, generation, KV caching and quantization
-are all implemented here and covered by tests and benchmarks.
+The code covers the complete inference pipeline, from tensor storage and
+transformer layers to tokenization, generation, KV caching and quantization.
+Each part is tested independently and measured in the benchmark suite.
 
 ## Features
 
