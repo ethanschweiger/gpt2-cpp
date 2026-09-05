@@ -138,6 +138,8 @@ version control; source code, tests, benchmark methodology and measured JSON
 results are tracked.
 
 The current milestone is summarized in [CHANGELOG.md](CHANGELOG.md).
+Every push and pull request also runs the Release build and full CTest suite
+through [GitHub Actions](.github/workflows/ci.yml).
 
 ## Project highlights
 

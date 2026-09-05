@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check 'numpy>=1.26,<3'
+
+      - name: Configure
+        run: >-
+          cmake -S . -B build-ci
+          -DCMAKE_BUILD_TYPE=Release
+          -DGPT2_WARNINGS_AS_ERRORS=ON
+          -DGPT2_BUILD_BENCHMARKS=ON
+
+      - name: Build
+        run: cmake --build build-ci --parallel
+
+      - name: Test
+        run: ctest --test-dir build-ci --output-on-failure
