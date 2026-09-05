@@ -117,7 +117,27 @@ struct TensorFixture {
     std::string name;
     std::vector<std::uint64_t> shape;
     std::vector<float> values;
+
+    // A tensor is int8 exactly when this is non-empty; a valid tensor
+    // always has at least one element (every dimension is required to
+    // be greater than zero), so an empty int8_values unambiguously
+    // means "read values instead" for every fixture below. Given a
+    // default here so existing three-field TensorFixture{...} literals
+    // elsewhere in this file do not need updating.
+    std::vector<std::int8_t> int8_values{};
 };
+
+TensorFixture make_int8_fixture(
+    std::string name,
+    std::vector<std::uint64_t> shape,
+    std::vector<std::int8_t> int8_values
+) {
+    TensorFixture fixture;
+    fixture.name = std::move(name);
+    fixture.shape = std::move(shape);
+    fixture.int8_values = std::move(int8_values);
+    return fixture;
+}
 
 Bytes make_checkpoint(const std::vector<TensorFixture>& tensors) {
     Bytes bytes{
@@ -138,31 +158,38 @@ Bytes make_checkpoint(const std::vector<TensorFixture>& tensors) {
     }
 
     for (const TensorFixture& tensor : tensors) {
+        const bool is_int8 = !tensor.int8_values.empty();
+        const std::uint64_t element_count = is_int8
+            ? static_cast<std::uint64_t>(tensor.int8_values.size())
+            : static_cast<std::uint64_t>(tensor.values.size());
+        const std::uint64_t bytes_per_element = is_int8 ? 1U : 4U;
+
         append_u32(
             bytes,
             static_cast<std::uint32_t>(tensor.name.size())
         );
-        append_u32(bytes, 1);
+        append_u32(bytes, is_int8 ? 2U : 1U);
         append_u32(
             bytes,
             static_cast<std::uint32_t>(tensor.shape.size())
         );
         append_u32(bytes, 0);
-        append_u64(
-            bytes,
-            static_cast<std::uint64_t>(tensor.values.size())
-        );
-        append_u64(
-            bytes,
-            static_cast<std::uint64_t>(tensor.values.size()) * 4U
-        );
+        append_u64(bytes, element_count);
+        append_u64(bytes, element_count * bytes_per_element);
 
         for (const std::uint64_t dimension : tensor.shape) {
             append_u64(bytes, dimension);
         }
         bytes.insert(bytes.end(), tensor.name.begin(), tensor.name.end());
-        for (const float value : tensor.values) {
-            append_float(bytes, value);
+
+        if (is_int8) {
+            for (const std::int8_t value : tensor.int8_values) {
+                bytes.push_back(static_cast<unsigned char>(value));
+            }
+        } else {
+            for (const float value : tensor.values) {
+                append_float(bytes, value);
+            }
         }
     }
 
@@ -277,6 +304,203 @@ void test_valid_checkpoint() {
             static_cast<void>(checkpoint.tensor("missing"));
         },
         "missing tensor lookup is rejected"
+    );
+}
+
+void test_int8_tensor_with_its_scale() {
+    const TensorFixture int8_weight = make_int8_fixture(
+        "weight",
+        {2, 3},
+        {1, -127, 0, 64, -64, 127}
+    );
+    const TensorFixture scale{
+        "weight.quant_scale",
+        {3},
+        {0.5F, 1.0F, 2.0F}
+    };
+
+    const TemporaryCheckpoint file(
+        make_checkpoint({int8_weight, scale})
+    );
+    const gpt2::Checkpoint checkpoint =
+        gpt2::load_checkpoint(file.path());
+
+    expect(
+        checkpoint.tensor_count() == 2,
+        "tensor count includes both the int8 tensor and its scale"
+    );
+    expect(
+        !checkpoint.contains("weight"),
+        "an int8 tensor is not found through the float32 accessor"
+    );
+    expect(
+        checkpoint.contains_int8("weight"),
+        "an int8 tensor is found through the int8 accessor"
+    );
+    expect(
+        !checkpoint.contains_int8("weight.quant_scale"),
+        "a scale tensor is not itself treated as int8"
+    );
+    expect(
+        checkpoint.contains("weight.quant_scale"),
+        "a scale tensor is an ordinary float32 tensor"
+    );
+
+    const gpt2::Int8Tensor& weight = checkpoint.int8_tensor("weight");
+    expect(
+        weight.shape() == gpt2::Int8Tensor::Shape{2, 3},
+        "int8 tensor shape is loaded"
+    );
+    expect(weight.data()[1] == -127, "a negative int8 value is loaded");
+    expect(weight.data()[5] == 127, "a positive int8 value is loaded");
+
+    const gpt2::Tensor& weight_scale =
+        checkpoint.tensor("weight.quant_scale");
+    expect(
+        weight_scale.shape() == gpt2::Tensor::Shape{3},
+        "scale shape is loaded"
+    );
+    expect(weight_scale.at(2) == 2.0F, "scale value is loaded");
+
+    expect_throws<std::out_of_range>(
+        [&checkpoint] {
+            static_cast<void>(checkpoint.tensor("weight"));
+        },
+        "an int8 tensor's name is rejected by the float32 accessor"
+    );
+    expect_throws<std::out_of_range>(
+        [&checkpoint] {
+            static_cast<void>(checkpoint.int8_tensor("missing"));
+        },
+        "missing int8 tensor lookup is rejected"
+    );
+}
+
+void test_int8_scale_may_precede_its_tensor() {
+    const TensorFixture scale{
+        "weight.quant_scale",
+        {2},
+        {1.0F, 2.0F}
+    };
+    const TensorFixture int8_weight = make_int8_fixture(
+        "weight",
+        {2, 2},
+        {1, -1, 2, -2}
+    );
+
+    const TemporaryCheckpoint file(
+        make_checkpoint({scale, int8_weight})
+    );
+    const gpt2::Checkpoint checkpoint =
+        gpt2::load_checkpoint(file.path());
+
+    expect(
+        checkpoint.contains_int8("weight"),
+        "a scale record written before its tensor still pairs correctly"
+    );
+}
+
+void test_int8_requires_its_scale() {
+    const TensorFixture int8_weight = make_int8_fixture(
+        "weight",
+        {2, 2},
+        {1, -1, 2, -2}
+    );
+
+    expect_load_failure(
+        make_checkpoint({int8_weight}),
+        "an int8 tensor with no scale at all is rejected"
+    );
+
+    const TensorFixture mismatched_int8_scale = make_int8_fixture(
+        "weight.quant_scale",
+        {2},
+        {1, 2}
+    );
+    expect_load_failure(
+        make_checkpoint({int8_weight, mismatched_int8_scale}),
+        "an int8 tensor whose scale is itself int8 is rejected"
+    );
+
+    const TensorFixture rank2_scale{
+        "weight.quant_scale",
+        {2, 1},
+        {1.0F, 2.0F}
+    };
+    expect_load_failure(
+        make_checkpoint({int8_weight, rank2_scale}),
+        "a rank-2 scale is rejected"
+    );
+
+    const TensorFixture wrong_length_scale{
+        "weight.quant_scale",
+        {3},
+        {1.0F, 2.0F, 3.0F}
+    };
+    expect_load_failure(
+        make_checkpoint({int8_weight, wrong_length_scale}),
+        "a scale whose length matches neither dimension is rejected"
+    );
+}
+
+void test_int8_rejects_invalid_values_and_sizes() {
+    expect_load_failure(
+        make_checkpoint({
+            make_int8_fixture(
+                "weight",
+                {2},
+                {0, std::numeric_limits<std::int8_t>::min()}
+            ),
+            TensorFixture{"weight.quant_scale", {2}, {1.0F, 1.0F}}
+        }),
+        "an int8 value of -128 is rejected"
+    );
+
+    // A hand-crafted record whose header claims one fewer payload
+    // byte than its element count requires.
+    TensorFixture short_payload = make_int8_fixture(
+        "weight",
+        {2},
+        {1, 2}
+    );
+    Bytes bytes = make_checkpoint({
+        short_payload,
+        TensorFixture{"weight.quant_scale", {2}, {1.0F, 1.0F}}
+    });
+    // The int8 tensor's payload_size field sits right after its
+    // 8-byte element_count field, both within the first tensor
+    // record, which starts immediately after the 64-byte global
+    // header.
+    constexpr std::size_t int8_payload_size_offset =
+        first_tensor_offset + 24;
+    write_u64_at(bytes, int8_payload_size_offset, 1);
+    expect_load_failure(
+        bytes,
+        "an int8 payload size that does not match its element count "
+        "is rejected"
+    );
+}
+
+void test_duplicate_name_across_data_types_is_rejected() {
+    const TensorFixture float32_weight{
+        "weight",
+        {2},
+        {1.0F, 2.0F}
+    };
+    const TensorFixture int8_weight = make_int8_fixture(
+        "weight",
+        {2},
+        {1, 2}
+    );
+    const TensorFixture scale{
+        "weight.quant_scale",
+        {2},
+        {1.0F, 1.0F}
+    };
+
+    expect_load_failure(
+        make_checkpoint({float32_weight, int8_weight, scale}),
+        "a name reused across data types is rejected as a duplicate"
     );
 }
 
@@ -615,6 +839,11 @@ void test_missing_file() {
 
 int main() {
     test_valid_checkpoint();
+    test_int8_tensor_with_its_scale();
+    test_int8_scale_may_precede_its_tensor();
+    test_int8_requires_its_scale();
+    test_int8_rejects_invalid_values_and_sizes();
+    test_duplicate_name_across_data_types_is_rejected();
     test_empty_checkpoint();
     test_large_payload_and_special_float_values();
     test_utf8_tensor_names();

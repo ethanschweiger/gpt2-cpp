@@ -94,6 +94,7 @@ add_library(gpt2_core STATIC
     src/attention.cpp
     src/checkpoint.cpp
     src/generation.cpp
+    src/int8_tensor.cpp
     src/layers.cpp
     src/model.cpp
     src/tensor.cpp
@@ -139,6 +140,16 @@ if(BUILD_TESTING)
 
     add_test(NAME tensor_unit COMMAND gpt2_tensor_tests)
     set_tests_properties(tensor_unit PROPERTIES LABELS unit)
+
+    add_executable(gpt2_int8_tensor_tests
+        tests/int8_tensor_test.cpp
+    )
+
+    target_link_libraries(gpt2_int8_tensor_tests PRIVATE gpt2_core)
+    gpt2_enable_warnings(gpt2_int8_tensor_tests)
+
+    add_test(NAME int8_tensor_unit COMMAND gpt2_int8_tensor_tests)
+    set_tests_properties(int8_tensor_unit PROPERTIES LABELS unit)
 
     add_executable(gpt2_tensor_ops_tests
         tests/tensor_ops_test.cpp

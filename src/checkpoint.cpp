@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -23,11 +24,13 @@ namespace {
 
 constexpr std::uint32_t expected_flags = 0;
 constexpr std::uint64_t float32_size = 4;
+constexpr std::uint64_t int8_size = 1;
 constexpr std::uint64_t tensor_header_size = 32;
 constexpr std::uint64_t dimension_size = 8;
 constexpr std::uint64_t minimum_name_size = 1;
 constexpr std::uint64_t minimum_tensor_record_size =
-    tensor_header_size + dimension_size + minimum_name_size + float32_size;
+    tensor_header_size + dimension_size + minimum_name_size + int8_size;
+constexpr std::string_view quant_scale_suffix = ".quant_scale";
 constexpr std::uint32_t maximum_tensor_count = 4096;
 constexpr std::uint32_t maximum_tensor_rank = 8;
 constexpr std::uint32_t maximum_tensor_name_size = 1024;
@@ -359,14 +362,22 @@ TensorHeader read_tensor_header(BinaryReader& reader) {
     };
 }
 
+bool is_int8_data_type(std::uint32_t data_type) {
+    return data_type ==
+        static_cast<std::uint32_t>(checkpoint_format::DataType::int8);
+}
+
+bool is_float32_data_type(std::uint32_t data_type) {
+    return data_type ==
+        static_cast<std::uint32_t>(checkpoint_format::DataType::float32);
+}
+
 void validate_tensor_header(
     BinaryReader& reader,
     const TensorHeader& header
 ) {
-    if (header.data_type !=
-        static_cast<std::uint32_t>(
-            checkpoint_format::DataType::float32
-        )) {
+    if (!is_float32_data_type(header.data_type) &&
+        !is_int8_data_type(header.data_type)) {
         throw std::runtime_error(
             "unsupported checkpoint tensor data type"
         );
@@ -535,15 +546,18 @@ Tensor::Shape read_shape(
         );
     }
 
+    const std::uint64_t bytes_per_element =
+        is_int8_data_type(header.data_type) ? int8_size : float32_size;
+
     if (header.element_count >
-        std::numeric_limits<std::uint64_t>::max() / float32_size) {
+        std::numeric_limits<std::uint64_t>::max() / bytes_per_element) {
         throw std::runtime_error(
             "checkpoint tensor payload size overflows uint64"
         );
     }
 
     const std::uint64_t expected_payload_size =
-        header.element_count * float32_size;
+        header.element_count * bytes_per_element;
     if (header.payload_size != expected_payload_size) {
         throw std::runtime_error(
             "checkpoint tensor payload size does not match its shape"
@@ -577,7 +591,7 @@ std::uint32_t decode_u32(const unsigned char* bytes) {
         (static_cast<std::uint32_t>(bytes[3]) << 24U);
 }
 
-std::vector<float> read_tensor_values(
+std::vector<float> read_float32_tensor_values(
     BinaryReader& reader,
     const TensorHeader& header
 ) {
@@ -623,18 +637,101 @@ std::vector<float> read_tensor_values(
     return values;
 }
 
+std::vector<std::int8_t> read_int8_tensor_values(
+    BinaryReader& reader,
+    const TensorHeader& header
+) {
+    reader.require_remaining(header.payload_size, "tensor payload");
+
+    const std::size_t element_count = checked_size_t(
+        header.element_count,
+        "tensor element count"
+    );
+    std::vector<std::int8_t> values;
+    if (element_count > values.max_size()) {
+        throw std::runtime_error(
+            "checkpoint tensor contains too many values"
+        );
+    }
+    values.resize(element_count);
+
+    // Each byte already is the value it represents, so no multi-byte
+    // decoding is needed the way float32 payloads require.
+    reader.read_exact(
+        reinterpret_cast<char*>(values.data()),
+        element_count,
+        "tensor payload"
+    );
+
+    for (const std::int8_t value : values) {
+        if (value == std::numeric_limits<std::int8_t>::min()) {
+            throw std::runtime_error(
+                "checkpoint int8 tensor value has no symmetric-"
+                "quantization counterpart: -128"
+            );
+        }
+    }
+
+    return values;
+}
+
+// Every int8 tensor must be paired with a float32, rank-1 scale
+// tensor whose length matches one of its own dimensions. The loader
+// enforces the pairing generically; which dimension the scale applies
+// to is a property of what the named tensor represents, decided by
+// model-loading code rather than by the checkpoint format itself.
+void require_quantization_scale(
+    const std::string& int8_tensor_name,
+    const Int8Tensor& int8_values,
+    const std::unordered_map<std::string, Tensor>& tensors
+) {
+    const std::string scale_name =
+        int8_tensor_name + std::string(quant_scale_suffix);
+    const auto position = tensors.find(scale_name);
+    if (position == tensors.end()) {
+        throw std::runtime_error(
+            "checkpoint int8 tensor is missing its quantization "
+            "scale: " + scale_name
+        );
+    }
+
+    const Tensor& scale = position->second;
+    if (scale.rank() != 1) {
+        throw std::runtime_error(
+            "checkpoint quantization scale must be a rank-1 tensor: " +
+            scale_name
+        );
+    }
+
+    const Int8Tensor::Shape& shape = int8_values.shape();
+    const bool matches_a_dimension =
+        std::find(shape.begin(), shape.end(), scale.numel()) !=
+        shape.end();
+    if (!matches_a_dimension) {
+        throw std::runtime_error(
+            "checkpoint quantization scale size does not match its "
+            "tensor: " + scale_name
+        );
+    }
+}
+
 }  // namespace
 
-Checkpoint::Checkpoint(ModelConfig config, TensorMap tensors)
+Checkpoint::Checkpoint(
+    ModelConfig config,
+    TensorMap tensors,
+    Int8TensorMap int8_tensors
+)
     : config_m(config),
-      tensors_m(std::move(tensors)) {}
+      tensors_m(std::move(tensors)),
+      int8_tensors_m(std::move(int8_tensors)) {}
 
 const ModelConfig& Checkpoint::config() const {
     return config_m;
 }
 
 std::size_t Checkpoint::tensor_count() const {
-    return tensors_m.size();
+    return tensors_m.size() + int8_tensors_m.size();
 }
 
 bool Checkpoint::contains(std::string_view name) const {
@@ -652,10 +749,26 @@ const Tensor& Checkpoint::tensor(std::string_view name) const {
     return position->second;
 }
 
+bool Checkpoint::contains_int8(std::string_view name) const {
+    return int8_tensors_m.find(std::string(name)) != int8_tensors_m.end();
+}
+
+const Int8Tensor& Checkpoint::int8_tensor(std::string_view name) const {
+    const auto position = int8_tensors_m.find(std::string(name));
+    if (position == int8_tensors_m.end()) {
+        throw std::out_of_range(
+            "checkpoint int8 tensor not found: " + std::string(name)
+        );
+    }
+
+    return position->second;
+}
+
 Checkpoint load_checkpoint(const std::filesystem::path& path) {
     BinaryReader reader(path);
     const GlobalHeader header = read_global_header(reader);
     Checkpoint::TensorMap tensors;
+    Checkpoint::Int8TensorMap int8_tensors;
     std::uint64_t total_payload_size = 0;
 
     for (std::uint32_t index = 0;
@@ -678,24 +791,48 @@ Checkpoint load_checkpoint(const std::filesystem::path& path) {
             tensor_header.name_length
         );
 
-        if (tensors.find(name) != tensors.end()) {
+        if (tensors.find(name) != tensors.end() ||
+            int8_tensors.find(name) != int8_tensors.end()) {
             throw std::runtime_error(
                 "checkpoint contains duplicate tensor: " + name
             );
         }
 
-        std::vector<float> values = read_tensor_values(
-            reader,
-            tensor_header
-        );
-        tensors.emplace(
-            std::move(name),
-            Tensor(std::move(shape), std::move(values))
-        );
+        if (is_int8_data_type(tensor_header.data_type)) {
+            std::vector<std::int8_t> values = read_int8_tensor_values(
+                reader,
+                tensor_header
+            );
+            int8_tensors.emplace(
+                std::move(name),
+                Int8Tensor(std::move(shape), std::move(values))
+            );
+        } else {
+            std::vector<float> values = read_float32_tensor_values(
+                reader,
+                tensor_header
+            );
+            tensors.emplace(
+                std::move(name),
+                Tensor(std::move(shape), std::move(values))
+            );
+        }
     }
 
     reader.require_end_of_file();
-    return Checkpoint(header.config, std::move(tensors));
+
+    // A tensor's scale may be written before or after the tensor
+    // itself, so the pairing is only fully checked once every record
+    // has been read.
+    for (const auto& [name, int8_values] : int8_tensors) {
+        require_quantization_scale(name, int8_values, tensors);
+    }
+
+    return Checkpoint(
+        header.config,
+        std::move(tensors),
+        std::move(int8_tensors)
+    );
 }
 
 }  // namespace gpt2

@@ -64,20 +64,54 @@ ends immediately after the final payload.
 | Code | Meaning | Bytes per element |
 | ---: | --- | ---: |
 | 1 | FP32 | 4 |
+| 2 | INT8 | 1 |
 
-Version 1 writers emit only FP32 tensors. Future versions may define int8
-quantization metadata and additional data-type codes.
+Adding INT8 did not require a new format version: the container (the global
+header, and every field of a tensor record) is unchanged, and a version 1
+reader already rejects any `data_type` value other than `1` with a clear
+error, so an INT8-bearing file is safely refused rather than misread by an
+older reader. Only the set of data-type codes a *version 1* reader is
+willing to accept has grown.
+
+## Quantization
+
+An INT8 tensor named `<name>` represents a symmetric, per-channel-quantized
+weight: each channel `i` was quantized as `Q_i = round(W_i / s_i)`, `Q_i in
+[-127, 127]`, with the corresponding scale `s_i = max(|W_i|) / 127`, and is
+approximately recovered as `W_i ≈ s_i * Q_i`. The value `-128` has no
+symmetric-quantization counterpart under this scheme and is rejected wherever
+it appears in an INT8 payload.
+
+A checkpoint that contains `<name>` as an INT8 tensor must also contain a
+tensor named `<name>.quant_scale` — an ordinary FP32, rank-1 tensor whose
+length equals one of `<name>`'s own dimensions. That length is the *number of
+channels*; which of `<name>`'s dimensions is "the channel axis" is
+deliberately not recorded in the checkpoint itself, because a matrix with two
+equal dimensions would make that ambiguous from shape alone even if it were.
+It is instead a fixed property of what `<name>` represents, decided by
+whichever model-loading code loads that specific tensor by name — the same
+place that already knows, independent of quantization, what shape `<name>`
+is supposed to have. The scale record may appear before or after its INT8
+tensor in the file; the loader accepts either order.
+
+A checkpoint may freely mix FP32 and INT8 tensors. A given tensor name is
+one or the other, never both, and `<name>.quant_scale` is always FP32
+regardless of what `<name>` is.
 
 ## Required invariants
 
-A valid version 1 checkpoint satisfies all of these conditions:
+A valid checkpoint satisfies all of these conditions:
 
 - The tensor count exactly matches the number of records.
 - All five model-configuration values are greater than zero.
-- Every tensor name is non-empty and unique.
+- Every tensor name is non-empty and unique, across both data types.
 - Every rank and dimension is greater than zero.
 - The element count equals the product of all dimensions.
 - For FP32, the payload size equals `element count * 4`.
+- For INT8, the payload size equals `element count * 1`, and every payload
+  byte is a value other than `-128`.
+- Every INT8 tensor `<name>` is paired with an FP32, rank-1 tensor named
+  `<name>.quant_scale` whose length matches one of `<name>`'s dimensions.
 - The embedding size is divisible by the attention-head count.
 - All version 1 flags and reserved fields are zero.
 - No record or payload extends beyond the end of the file.
