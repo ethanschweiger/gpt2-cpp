@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <stdexcept>
 
 namespace gpt2 {
@@ -50,6 +52,70 @@ Tensor embedding_lookup(
             result_data + token_index * embedding_size;
 
         std::copy_n(source, embedding_size, destination);
+    }
+
+    return result;
+}
+
+Tensor quantized_embedding_lookup(
+    const Int8Tensor& embedding_table,
+    const Tensor& embedding_scale,
+    std::span<const std::size_t> token_ids
+) {
+    if (embedding_table.rank() != 2) {
+        throw std::invalid_argument(
+            "quantized embedding table must be a rank-2 tensor"
+        );
+    }
+
+    const std::size_t vocabulary_size =
+        embedding_table.shape()[0];
+    const std::size_t embedding_size =
+        embedding_table.shape()[1];
+
+    if (embedding_scale.rank() != 1 ||
+        embedding_scale.numel() != vocabulary_size) {
+        throw std::invalid_argument(
+            "quantized embedding scale must have one value per "
+            "vocabulary entry"
+        );
+    }
+
+    if (token_ids.empty()) {
+        throw std::invalid_argument(
+            "embedding lookup requires at least one token"
+        );
+    }
+
+    Tensor result({token_ids.size(), embedding_size});
+
+    const std::int8_t* table_data = embedding_table.data();
+    const float* scale_data = embedding_scale.data();
+    float* result_data = result.data();
+
+    for (std::size_t token_index = 0;
+         token_index < token_ids.size();
+         ++token_index) {
+        const std::size_t token_id = token_ids[token_index];
+
+        if (token_id >= vocabulary_size) {
+            throw std::out_of_range(
+                "token ID is outside the embedding vocabulary"
+            );
+        }
+
+        const std::int8_t* source =
+            table_data + token_id * embedding_size;
+        float* destination =
+            result_data + token_index * embedding_size;
+        const float scale = scale_data[token_id];
+
+        for (std::size_t feature = 0;
+             feature < embedding_size;
+             ++feature) {
+            destination[feature] =
+                static_cast<float>(source[feature]) * scale;
+        }
     }
 
     return result;
@@ -173,6 +239,65 @@ Tensor linear(
     }
 
     Tensor result = matmul(input, weight);
+
+    float* result_data = result.data();
+    const float* bias_data = bias.data();
+    const std::size_t row_count = input.shape()[0];
+
+    for (std::size_t row = 0; row < row_count; ++row) {
+        for (std::size_t output_feature = 0;
+             output_feature < output_feature_count;
+             ++output_feature) {
+            const std::size_t index =
+                row * output_feature_count + output_feature;
+
+            result_data[index] += bias_data[output_feature];
+        }
+    }
+
+    return result;
+}
+
+Tensor quantized_linear(
+    const Tensor& input,
+    const Int8Tensor& weight,
+    const Tensor& weight_scale,
+    const Tensor& bias
+) {
+    if (input.rank() != 2 || weight.rank() != 2) {
+        throw std::invalid_argument(
+            "quantized linear input and weight must be rank-2 tensors"
+        );
+    }
+
+    if (bias.rank() != 1) {
+        throw std::invalid_argument(
+            "quantized linear bias must be a rank-1 tensor"
+        );
+    }
+
+    const std::size_t input_feature_count =
+        input.shape()[1];
+    const std::size_t output_feature_count =
+        weight.shape()[1];
+
+    if (weight.shape()[0] != input_feature_count) {
+        throw std::invalid_argument(
+            "quantized linear weight input size does not match the "
+            "input"
+        );
+    }
+
+    if (bias.numel() != output_feature_count) {
+        throw std::invalid_argument(
+            "quantized linear bias size does not match the output "
+            "size"
+        );
+    }
+
+    // quantized_matmul checks weight_scale's own shape against
+    // weight's, so this function need not repeat that check.
+    Tensor result = quantized_matmul(input, weight, weight_scale);
 
     float* result_data = result.data();
     const float* bias_data = bias.data();

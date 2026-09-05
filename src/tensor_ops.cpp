@@ -1,6 +1,8 @@
 #include "gpt2/tensor_ops.h"
 
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <stdexcept>
 
 namespace gpt2 {
@@ -57,6 +59,64 @@ Tensor matmul(const Tensor& left, const Tensor& right) {
                 sum +=
                     left_data[row * shared_size + inner] *
                     right_data[inner * columns + column];
+            }
+
+            result_data[row * columns + column] = sum;
+        }
+    }
+
+    return result;
+}
+
+Tensor quantized_matmul(
+    const Tensor& left,
+    const Int8Tensor& right,
+    const Tensor& right_scale
+) {
+    if (left.rank() != 2 || right.rank() != 2) {
+        throw std::invalid_argument(
+            "quantized matrix multiplication requires rank-2 tensors"
+        );
+    }
+
+    const std::size_t rows = left.shape()[0];
+    const std::size_t shared_size = left.shape()[1];
+    const std::size_t right_rows = right.shape()[0];
+    const std::size_t columns = right.shape()[1];
+
+    if (shared_size != right_rows) {
+        throw std::invalid_argument(
+            "quantized matrix multiplication dimensions are incompatible"
+        );
+    }
+
+    if (right_scale.rank() != 1 || right_scale.numel() != columns) {
+        throw std::invalid_argument(
+            "quantized matrix multiplication scale must have one "
+            "value per output column"
+        );
+    }
+
+    Tensor result({rows, columns});
+
+    const float* left_data = left.data();
+    const std::int8_t* right_data = right.data();
+    const float* scale_data = right_scale.data();
+    float* result_data = result.data();
+
+    for (std::size_t row = 0; row < rows; ++row) {
+        for (std::size_t column = 0; column < columns; ++column) {
+            const float scale = scale_data[column];
+            float sum = 0.0F;
+
+            for (std::size_t inner = 0; inner < shared_size; ++inner) {
+                const float dequantized_weight =
+                    static_cast<float>(
+                        right_data[inner * columns + column]
+                    ) * scale;
+                sum +=
+                    left_data[row * shared_size + inner] *
+                    dequantized_weight;
             }
 
             result_data[row * columns + column] = sum;

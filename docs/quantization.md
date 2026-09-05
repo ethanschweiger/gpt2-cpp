@@ -111,6 +111,30 @@ the same two flags as independent keyword arguments for programmatic
 use, and `quantize_per_channel` is exposed directly for testing or
 reuse.
 
+## Running quantized weights
+
+Three C++ operations dequantize as they compute rather than up front,
+matching the "why measure speed rather than assume it" design above —
+each is a drop-in sibling of an existing, already-tested operation:
+
+| existing (FP32) | quantized sibling | lives in |
+| --- | --- | --- |
+| `matmul` | `quantized_matmul` | `tensor_ops.h` |
+| `linear` | `quantized_linear` | `layers.h` |
+| `embedding_lookup` | `quantized_embedding_lookup` | `layers.h` |
+
+Each is verified two ways: hand-computed expected values (the same
+style the FP32 originals' own tests use), and a direct cross-check
+against calling the *original* FP32 operation on an explicitly
+dequantized copy of the same weight — so a quantized operation's
+result is checked against the un-quantized one it is standing in for,
+not only against its own arithmetic restated.
+
+`Gpt2Model` does not yet call any of these. Nothing in the model
+currently inspects whether a checkpoint tensor is FP32 or int8 — that
+dispatch, and running the two real quantized checkpoints below through
+it end to end, is the next step.
+
 ## Real GPT-2 Small checkpoint sizes
 
 Measured against the same pinned revision used throughout this project
@@ -161,3 +185,11 @@ these checkpoints — see [Benchmarking](benchmarks.md).
   source within half its channel's quantization step — real PyTorch
   tensors and real per-channel math, not the lighter fake-tensor
   stand-in the unit tests above use.
+- `tests/tensor_ops_test.cpp` and `tests/layers_test.cpp` cover
+  `quantized_matmul`, `quantized_linear` and
+  `quantized_embedding_lookup`: hand-computed expected values, a match
+  against the FP32 operation over an explicitly dequantized copy of
+  the same weight, and (for the embedding lookup) that each row is
+  dequantized with *its own* row's scale rather than, say, the scale
+  at its position in the output — the specific mistake a token order
+  that happened to match row order would hide.

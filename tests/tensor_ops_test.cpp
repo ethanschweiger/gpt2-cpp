@@ -2,6 +2,8 @@
 
 #include <array>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <exception>
 #include <iostream>
@@ -215,6 +217,145 @@ void test_invalid_matrix_multiplication() {
     );
 }
 
+void test_quantized_matrix_multiplication() {
+    const gpt2::Tensor left(
+        {2, 3},
+        std::vector<float>{1.0F, 2.0F, 3.0F, 4.0F, 5.0F, 6.0F}
+    );
+    // Values chosen as exact multiples of their column's scale, so the
+    // dequantized weight -- and therefore the expected result -- has
+    // no rounding to reason about.
+    const gpt2::Int8Tensor right(
+        {3, 2},
+        std::vector<std::int8_t>{10, 20, 30, 40, 50, 60}
+    );
+    const gpt2::Tensor scale({2}, std::vector<float>{1.0F, 2.0F});
+
+    const gpt2::Tensor result = gpt2::quantized_matmul(left, right, scale);
+
+    expect(
+        result.shape() == gpt2::Tensor::Shape{2, 2},
+        "quantized matrix multiplication produces the expected shape"
+    );
+    expect(
+        result.at(0) == 220.0F,
+        "quantized result at row 0 column 0 is correct"
+    );
+    expect(
+        result.at(1) == 560.0F,
+        "quantized result at row 0 column 1 is correct"
+    );
+    expect(
+        result.at(2) == 490.0F,
+        "quantized result at row 1 column 0 is correct"
+    );
+    expect(
+        result.at(3) == 1280.0F,
+        "quantized result at row 1 column 1 is correct"
+    );
+
+    expect(left.at(0) == 1.0F, "quantized_matmul leaves the input unchanged");
+    expect(
+        right.data()[0] == 10,
+        "quantized_matmul leaves the quantized weight unchanged"
+    );
+}
+
+void test_quantized_matmul_matches_dequantize_then_matmul() {
+    const gpt2::Tensor left(
+        {2, 4},
+        std::vector<float>{
+            -3.5F, 2.0F, 0.25F, 7.0F,
+            1.0F, -6.0F, 4.5F, 0.5F
+        }
+    );
+    const std::vector<std::int8_t> quantized_values{
+        127, -64, 0, 50,
+        -100, 30, 90, -127,
+        10, 10, -10, 20
+    };
+    const gpt2::Int8Tensor right({4, 3}, quantized_values);
+    const gpt2::Tensor scale(
+        {3},
+        std::vector<float>{0.1F, 0.02F, 0.5F}
+    );
+
+    gpt2::Tensor dequantized_right({4, 3});
+    for (std::size_t row = 0; row < 4; ++row) {
+        for (std::size_t column = 0; column < 3; ++column) {
+            const std::array<std::size_t, 2> index{row, column};
+            dequantized_right.at(index) =
+                static_cast<float>(quantized_values[row * 3 + column]) *
+                scale.at(column);
+        }
+    }
+
+    const gpt2::Tensor quantized_result =
+        gpt2::quantized_matmul(left, right, scale);
+    const gpt2::Tensor plain_result = gpt2::matmul(left, dequantized_right);
+
+    for (std::size_t index = 0; index < quantized_result.numel(); ++index) {
+        expect_near(
+            quantized_result.at(index),
+            plain_result.at(index),
+            1.0e-4F,
+            "quantized_matmul matches matmul over an explicitly "
+            "dequantized copy of the same weight"
+        );
+    }
+}
+
+void test_invalid_quantized_matrix_multiplication() {
+    expect_throws<std::invalid_argument>(
+        [] {
+            const gpt2::Tensor left({3});
+            const gpt2::Int8Tensor right({3, 1}, {1, 2, 3});
+            const gpt2::Tensor scale({1}, std::vector<float>{1.0F});
+            static_cast<void>(gpt2::quantized_matmul(left, right, scale));
+        },
+        "quantized_matmul rejects a left operand that is not rank 2"
+    );
+
+    expect_throws<std::invalid_argument>(
+        [] {
+            const gpt2::Tensor left({2, 3});
+            const gpt2::Int8Tensor right({2, 2}, {1, 2, 3, 4});
+            const gpt2::Tensor scale({2}, std::vector<float>{1.0F, 1.0F});
+            static_cast<void>(gpt2::quantized_matmul(left, right, scale));
+        },
+        "quantized_matmul rejects incompatible inner dimensions"
+    );
+
+    expect_throws<std::invalid_argument>(
+        [] {
+            const gpt2::Tensor left({2, 3});
+            const gpt2::Int8Tensor right(
+                {3, 2},
+                std::vector<std::int8_t>{1, 2, 3, 4, 5, 6}
+            );
+            const gpt2::Tensor scale(
+                {3},
+                std::vector<float>{1.0F, 1.0F, 1.0F}
+            );
+            static_cast<void>(gpt2::quantized_matmul(left, right, scale));
+        },
+        "quantized_matmul rejects a scale with the wrong length"
+    );
+
+    expect_throws<std::invalid_argument>(
+        [] {
+            const gpt2::Tensor left({2, 3});
+            const gpt2::Int8Tensor right(
+                {3, 2},
+                std::vector<std::int8_t>{1, 2, 3, 4, 5, 6}
+            );
+            const gpt2::Tensor scale({1, 2}, std::vector<float>{1.0F, 1.0F});
+            static_cast<void>(gpt2::quantized_matmul(left, right, scale));
+        },
+        "quantized_matmul rejects a scale that is not rank 1"
+    );
+}
+
 void test_matrix_transpose() {
     const gpt2::Tensor input(
         {2, 3},
@@ -351,6 +492,9 @@ int main() {
     test_matrix_by_column_vector();
     test_identity_matrix_multiplication();
     test_invalid_matrix_multiplication();
+    test_quantized_matrix_multiplication();
+    test_quantized_matmul_matches_dequantize_then_matmul();
+    test_invalid_quantized_matrix_multiplication();
     test_matrix_transpose();
     test_invalid_matrix_transpose();
     test_stable_row_wise_softmax();
