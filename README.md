@@ -26,9 +26,16 @@ Each part is tested independently and measured in the benchmark suite.
 
 ## Quick start
 
+Requires a C++20 compiler, CMake 3.20 or newer, and Python 3.10 or newer.
+The default exporter test also requires NumPy; install it in an isolated
+Python environment and select that interpreter when configuring CMake:
+
 ```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install 'numpy>=1.26,<3'
 cmake -S . -B build-debug -DCMAKE_BUILD_TYPE=Debug \
-  -DGPT2_WARNINGS_AS_ERRORS=ON
+  -DGPT2_WARNINGS_AS_ERRORS=ON \
+  -DPython3_EXECUTABLE="$PWD/.venv/bin/python"
 cmake --build build-debug --parallel
 ctest --test-dir build-debug --output-on-failure
 ```
@@ -57,7 +64,7 @@ Sampling is opt-in and reproducible with a seed:
   --merges "$HF_SNAPSHOT/merges.txt" \
   --prompt "Once upon a time" \
   --max-new-tokens 24 \
-  --temperature 0.8 --top-k 40 --top-p 0.95 --seed 42
+  --sample --temperature 0.8 --top-k 40 --top-p 0.95 --seed 42
 ```
 
 Use `--no-cache` to exercise the reference decoder. The default cached path
@@ -72,7 +79,8 @@ The generation benchmark is opt-in so ordinary builds stay small:
 cmake -S . -B build-benchmark \
   -DCMAKE_BUILD_TYPE=Release \
   -DGPT2_WARNINGS_AS_ERRORS=ON \
-  -DGPT2_BUILD_BENCHMARKS=ON
+  -DGPT2_BUILD_BENCHMARKS=ON \
+  -DPython3_EXECUTABLE="$PWD/.venv/bin/python"
 cmake --build build-benchmark --parallel
 ctest --test-dir build-benchmark --output-on-failure
 ```
