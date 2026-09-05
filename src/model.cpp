@@ -20,6 +20,15 @@ namespace {
 constexpr std::size_t top_level_tensor_count = 4;
 constexpr std::size_t tensors_per_layer = 12;
 
+// A quantized tensor costs one extra checkpoint record (its
+// ".quant_scale" companion), so the true worst-case totals below --
+// used only to keep the overflow guard in validate_checkpoint_schema
+// correct, not as the expected count itself -- add one for wte and
+// one per per-layer quantizable weight (4).
+constexpr std::size_t max_top_level_tensor_count =
+    top_level_tensor_count + 1;
+constexpr std::size_t max_tensors_per_layer = tensors_per_layer + 4;
+
 std::uint64_t next_model_identity() {
     static std::atomic<std::uint64_t> next{1};
     return next.fetch_add(1, std::memory_order_relaxed);
@@ -62,6 +71,58 @@ std::string layer_prefix(std::size_t layer) {
     return "transformer.h." + std::to_string(layer);
 }
 
+enum class TensorPrecision {
+    fp32,
+    int8,
+};
+
+// Like require_tensor, but `name` may instead be a per-channel-
+// quantized int8 tensor: symmetric per-channel quantization (see
+// docs/quantization.md) with an accompanying ".quant_scale" FP32
+// tensor. `scale_axis` is which of expected_shape's dimensions is the
+// channel axis for this specific tensor — that is a property of what
+// the tensor represents, not something a shape can answer on its own
+// (see the note on c_proj's square weight matrix in
+// docs/quantization.md), so every call site below states it
+// explicitly. Returns which of the two forms was found.
+TensorPrecision require_linear_weight(
+    const Checkpoint& checkpoint,
+    const std::string& name,
+    const Tensor::Shape& expected_shape,
+    std::size_t scale_axis
+) {
+    if (checkpoint.contains_int8(name)) {
+        const Int8Tensor& tensor = checkpoint.int8_tensor(name);
+        if (tensor.shape() != expected_shape) {
+            throw std::invalid_argument(
+                "checkpoint tensor has an invalid shape: " + name
+            );
+        }
+
+        const std::string scale_name = name + ".quant_scale";
+        if (!checkpoint.contains(scale_name)) {
+            throw std::invalid_argument(
+                "checkpoint is missing the quantization scale for: " +
+                name
+            );
+        }
+
+        const Tensor& scale = checkpoint.tensor(scale_name);
+        if (scale.rank() != 1 ||
+            scale.numel() != expected_shape.at(scale_axis)) {
+            throw std::invalid_argument(
+                "checkpoint quantization scale has an invalid shape: " +
+                name
+            );
+        }
+
+        return TensorPrecision::int8;
+    }
+
+    static_cast<void>(require_tensor(checkpoint, name, expected_shape));
+    return TensorPrecision::fp32;
+}
+
 void validate_checkpoint_schema(const Checkpoint& checkpoint) {
     const ModelConfig& config = checkpoint.config();
     const std::size_t vocabulary_size =
@@ -83,17 +144,9 @@ void validate_checkpoint_schema(const Checkpoint& checkpoint) {
 
     if (layer_count >
         (std::numeric_limits<std::size_t>::max() -
-         top_level_tensor_count) / tensors_per_layer) {
+         max_top_level_tensor_count) / max_tensors_per_layer) {
         throw std::invalid_argument(
             "checkpoint layer count is too large"
-        );
-    }
-
-    const std::size_t expected_tensor_count =
-        layer_count * tensors_per_layer + top_level_tensor_count;
-    if (checkpoint.tensor_count() != expected_tensor_count) {
-        throw std::invalid_argument(
-            "checkpoint tensor count does not match the GPT-2 schema"
         );
     }
 
@@ -108,16 +161,40 @@ void validate_checkpoint_schema(const Checkpoint& checkpoint) {
         "checkpoint embedding size is too large for feed-forward parameters"
     );
 
-    static_cast<void>(require_tensor(
-        checkpoint,
-        "transformer.wte.weight",
-        {vocabulary_size, embedding_size}
-    ));
+    // A quantized tensor occupies two checkpoint records (its int8
+    // payload and its ".quant_scale" companion) rather than one, so
+    // the exact record count the schema expects depends on how many
+    // of the five quantizable tensors turn out to be int8; that is
+    // only known once every one of them has been inspected below, so
+    // the total-count check itself happens at the end of this
+    // function rather than up front.
+    std::size_t quantized_tensor_count = 0;
+
+    // wte's channel axis is its rows (axis 0) -- one per vocabulary
+    // word -- not its columns; see docs/quantization.md.
+    if (require_linear_weight(
+            checkpoint,
+            "transformer.wte.weight",
+            {vocabulary_size, embedding_size},
+            0
+        ) == TensorPrecision::int8) {
+        ++quantized_tensor_count;
+    }
     static_cast<void>(require_tensor(
         checkpoint,
         "transformer.wpe.weight",
         {context_length, embedding_size}
     ));
+
+    // Every layer's four linear weights are quantized together or not
+    // at all: transformer_block/quantized_transformer_block each bind
+    // a whole block to one precision, so a layer mixing the two has
+    // no block function to run it. tools/export_gpt2.py's --quantize
+    // flag likewise applies to every transformer layer uniformly, so a
+    // checkpoint where layers disagree cannot come from that exporter
+    // and is rejected here rather than silently accepted.
+    bool transformer_weight_precision_known = false;
+    TensorPrecision transformer_weight_precision = TensorPrecision::fp32;
 
     for (std::size_t layer = 0; layer < layer_count; ++layer) {
         const std::string prefix = layer_prefix(layer);
@@ -132,21 +209,23 @@ void validate_checkpoint_schema(const Checkpoint& checkpoint) {
             prefix + ".ln_1.bias",
             {embedding_size}
         ));
-        static_cast<void>(require_tensor(
+        const TensorPrecision c_attn_precision = require_linear_weight(
             checkpoint,
             prefix + ".attn.c_attn.weight",
-            {embedding_size, qkv_size}
-        ));
+            {embedding_size, qkv_size},
+            1
+        );
         static_cast<void>(require_tensor(
             checkpoint,
             prefix + ".attn.c_attn.bias",
             {qkv_size}
         ));
-        static_cast<void>(require_tensor(
+        const TensorPrecision attn_proj_precision = require_linear_weight(
             checkpoint,
             prefix + ".attn.c_proj.weight",
-            {embedding_size, embedding_size}
-        ));
+            {embedding_size, embedding_size},
+            1
+        );
         static_cast<void>(require_tensor(
             checkpoint,
             prefix + ".attn.c_proj.bias",
@@ -162,26 +241,51 @@ void validate_checkpoint_schema(const Checkpoint& checkpoint) {
             prefix + ".ln_2.bias",
             {embedding_size}
         ));
-        static_cast<void>(require_tensor(
+        const TensorPrecision mlp_fc_precision = require_linear_weight(
             checkpoint,
             prefix + ".mlp.c_fc.weight",
-            {embedding_size, feed_forward_size}
-        ));
+            {embedding_size, feed_forward_size},
+            1
+        );
         static_cast<void>(require_tensor(
             checkpoint,
             prefix + ".mlp.c_fc.bias",
             {feed_forward_size}
         ));
-        static_cast<void>(require_tensor(
+        const TensorPrecision mlp_proj_precision = require_linear_weight(
             checkpoint,
             prefix + ".mlp.c_proj.weight",
-            {feed_forward_size, embedding_size}
-        ));
+            {feed_forward_size, embedding_size},
+            1
+        );
         static_cast<void>(require_tensor(
             checkpoint,
             prefix + ".mlp.c_proj.bias",
             {embedding_size}
         ));
+
+        if (c_attn_precision != attn_proj_precision ||
+            c_attn_precision != mlp_fc_precision ||
+            c_attn_precision != mlp_proj_precision) {
+            throw std::invalid_argument(
+                "checkpoint mixes float32 and int8 weights within layer " +
+                std::to_string(layer)
+            );
+        }
+
+        if (c_attn_precision == TensorPrecision::int8) {
+            quantized_tensor_count += 4;
+        }
+
+        if (!transformer_weight_precision_known) {
+            transformer_weight_precision = c_attn_precision;
+            transformer_weight_precision_known = true;
+        } else if (c_attn_precision != transformer_weight_precision) {
+            throw std::invalid_argument(
+                "checkpoint quantizes some transformer layers but not "
+                "others"
+            );
+        }
     }
 
     static_cast<void>(require_tensor(
@@ -194,6 +298,15 @@ void validate_checkpoint_schema(const Checkpoint& checkpoint) {
         "transformer.ln_f.bias",
         {embedding_size}
     ));
+
+    const std::size_t expected_tensor_count =
+        layer_count * tensors_per_layer + top_level_tensor_count +
+        quantized_tensor_count;
+    if (checkpoint.tensor_count() != expected_tensor_count) {
+        throw std::invalid_argument(
+            "checkpoint tensor count does not match the GPT-2 schema"
+        );
+    }
 }
 
 TransformerBlockParameters bind_block(
@@ -232,6 +345,116 @@ TransformerBlockParameters bind_block(
             },
         },
     };
+}
+
+// Like bind_block, but every linear weight is read as its int8 form
+// plus its ".quant_scale" companion. Callers must already have
+// confirmed (via validate_checkpoint_schema, at construction) that
+// this layer's four linear weights are all int8 -- this does not
+// re-check that, so calling it on an FP32 layer throws whatever
+// Checkpoint::int8_tensor throws for a name it does not hold.
+QuantizedTransformerBlockParameters bind_quantized_block(
+    const Checkpoint& checkpoint,
+    std::size_t layer
+) {
+    const std::string prefix = layer_prefix(layer);
+
+    return {
+        {
+            checkpoint.tensor(prefix + ".ln_1.weight"),
+            checkpoint.tensor(prefix + ".ln_1.bias"),
+        },
+        {
+            {
+                checkpoint.int8_tensor(prefix + ".attn.c_attn.weight"),
+                checkpoint.tensor(
+                    prefix + ".attn.c_attn.weight.quant_scale"
+                ),
+                checkpoint.tensor(prefix + ".attn.c_attn.bias"),
+            },
+            {
+                checkpoint.int8_tensor(prefix + ".attn.c_proj.weight"),
+                checkpoint.tensor(
+                    prefix + ".attn.c_proj.weight.quant_scale"
+                ),
+                checkpoint.tensor(prefix + ".attn.c_proj.bias"),
+            },
+        },
+        {
+            checkpoint.tensor(prefix + ".ln_2.weight"),
+            checkpoint.tensor(prefix + ".ln_2.bias"),
+        },
+        {
+            {
+                checkpoint.int8_tensor(prefix + ".mlp.c_fc.weight"),
+                checkpoint.tensor(
+                    prefix + ".mlp.c_fc.weight.quant_scale"
+                ),
+                checkpoint.tensor(prefix + ".mlp.c_fc.bias"),
+            },
+            {
+                checkpoint.int8_tensor(prefix + ".mlp.c_proj.weight"),
+                checkpoint.tensor(
+                    prefix + ".mlp.c_proj.weight.quant_scale"
+                ),
+                checkpoint.tensor(prefix + ".mlp.c_proj.bias"),
+            },
+        },
+    };
+}
+
+// Runs one transformer layer, dispatching to the FP32 or quantized
+// block implementation according to whatever this layer's own
+// tensors are; validate_checkpoint_schema has already confirmed all
+// four of a layer's linear weights agree, so checking just one
+// (c_attn) is enough to know which of the two this layer is.
+Tensor run_transformer_layer(
+    const Checkpoint& checkpoint,
+    std::size_t layer,
+    const Tensor& hidden_state,
+    std::size_t head_count
+) {
+    const std::string prefix = layer_prefix(layer);
+
+    if (checkpoint.contains_int8(prefix + ".attn.c_attn.weight")) {
+        return quantized_transformer_block(
+            hidden_state,
+            bind_quantized_block(checkpoint, layer),
+            head_count
+        );
+    }
+
+    return transformer_block(
+        hidden_state,
+        bind_block(checkpoint, layer),
+        head_count
+    );
+}
+
+Tensor run_cached_transformer_layer(
+    const Checkpoint& checkpoint,
+    std::size_t layer,
+    const Tensor& hidden_state,
+    std::size_t head_count,
+    AttentionCache& cache
+) {
+    const std::string prefix = layer_prefix(layer);
+
+    if (checkpoint.contains_int8(prefix + ".attn.c_attn.weight")) {
+        return quantized_transformer_block(
+            hidden_state,
+            bind_quantized_block(checkpoint, layer),
+            head_count,
+            cache
+        );
+    }
+
+    return transformer_block(
+        hidden_state,
+        bind_block(checkpoint, layer),
+        head_count,
+        cache
+    );
 }
 
 Tensor tied_embedding_logits(
@@ -281,6 +504,120 @@ Tensor tied_embedding_logits(
     }
 
     return logits;
+}
+
+// Like tied_embedding_logits, but token_embeddings is read as its int8
+// form: each element is dequantized (cast, then scaled by its row's
+// own entry in token_embeddings_scale) as it is consumed, rather than
+// materializing a dequantized copy of the whole table first -- the
+// same inline-dequantize approach quantized_linear/quantized_matmul
+// use. wte's channel axis is its rows (one scale per vocabulary word),
+// so the scale here is indexed by vocabulary_index, unlike
+// quantized_linear's per-output-column indexing; see
+// docs/quantization.md.
+Tensor quantized_tied_embedding_logits(
+    const Tensor& hidden_state,
+    const Int8Tensor& token_embeddings,
+    const Tensor& token_embeddings_scale
+) {
+    if (hidden_state.rank() != 2 || token_embeddings.rank() != 2) {
+        throw std::invalid_argument(
+            "tied output projection requires rank-2 tensors"
+        );
+    }
+
+    const std::size_t sequence_length = hidden_state.shape()[0];
+    const std::size_t embedding_size = hidden_state.shape()[1];
+    const std::size_t vocabulary_size = token_embeddings.shape()[0];
+
+    if (token_embeddings.shape()[1] != embedding_size) {
+        throw std::invalid_argument(
+            "token embedding width must match the hidden-state width"
+        );
+    }
+
+    if (token_embeddings_scale.rank() != 1 ||
+        token_embeddings_scale.numel() != vocabulary_size) {
+        throw std::invalid_argument(
+            "token embedding scale must have one entry per vocabulary "
+            "word"
+        );
+    }
+
+    Tensor logits({sequence_length, vocabulary_size});
+
+    const float* hidden_data = hidden_state.data();
+    const std::int8_t* embedding_data = token_embeddings.data();
+    const float* scale_data = token_embeddings_scale.data();
+    float* logits_data = logits.data();
+
+    for (std::size_t token = 0; token < sequence_length; ++token) {
+        for (std::size_t vocabulary_index = 0;
+             vocabulary_index < vocabulary_size;
+             ++vocabulary_index) {
+            const float scale = scale_data[vocabulary_index];
+            float sum = 0.0F;
+
+            for (std::size_t feature = 0;
+                 feature < embedding_size;
+                 ++feature) {
+                sum +=
+                    hidden_data[token * embedding_size + feature] *
+                    static_cast<float>(
+                        embedding_data[
+                            vocabulary_index * embedding_size + feature
+                        ]
+                    ) * scale;
+            }
+
+            logits_data[token * vocabulary_size + vocabulary_index] = sum;
+        }
+    }
+
+    return logits;
+}
+
+// Reads the token embedding table, dispatching to the int8 path when
+// wte was quantized and the FP32 path otherwise.
+Tensor lookup_token_embeddings(
+    const Checkpoint& checkpoint,
+    std::span<const std::size_t> token_ids
+) {
+    if (checkpoint.contains_int8("transformer.wte.weight")) {
+        return quantized_embedding_lookup(
+            checkpoint.int8_tensor("transformer.wte.weight"),
+            checkpoint.tensor("transformer.wte.weight.quant_scale"),
+            token_ids
+        );
+    }
+
+    return embedding_lookup(
+        checkpoint.tensor("transformer.wte.weight"),
+        token_ids
+    );
+}
+
+// Projects a hidden state onto the vocabulary through the tied
+// embedding, dispatching to the int8 path when wte was quantized and
+// the FP32 path otherwise. wte's own precision is independent of the
+// transformer layers' -- config 2 (see docs/quantization.md) keeps wte
+// FP32 while every layer is int8.
+Tensor compute_tied_logits(
+    const Checkpoint& checkpoint,
+    const Tensor& hidden_state
+) {
+    if (checkpoint.contains_int8("transformer.wte.weight")) {
+        return quantized_tied_embedding_logits(
+            hidden_state,
+            checkpoint.int8_tensor("transformer.wte.weight"),
+            checkpoint.tensor("transformer.wte.weight.quant_scale")
+        );
+    }
+
+    return tied_embedding_logits(
+        hidden_state,
+        checkpoint.tensor("transformer.wte.weight")
+    );
 }
 
 // Copies out the final row of a [sequence length, embedding size]
@@ -376,10 +713,8 @@ Tensor Gpt2Model::run_transformer_stack(
     std::vector<std::size_t> position_ids(token_ids.size());
     std::iota(position_ids.begin(), position_ids.end(), std::size_t{0});
 
-    const Tensor token_state = embedding_lookup(
-        checkpoint_m.tensor("transformer.wte.weight"),
-        token_ids
-    );
+    const Tensor token_state =
+        lookup_token_embeddings(checkpoint_m, token_ids);
     const Tensor position_state = embedding_lookup(
         checkpoint_m.tensor("transformer.wpe.weight"),
         position_ids
@@ -392,12 +727,10 @@ Tensor Gpt2Model::run_transformer_stack(
         static_cast<std::size_t>(config().head_count);
 
     for (std::size_t layer = 0; layer < layer_count; ++layer) {
-        const TransformerBlockParameters parameters =
-            bind_block(checkpoint_m, layer);
-
-        hidden_state = transformer_block(
+        hidden_state = run_transformer_layer(
+            checkpoint_m,
+            layer,
             hidden_state,
-            parameters,
             head_count
         );
     }
@@ -412,18 +745,18 @@ Tensor Gpt2Model::run_transformer_stack(
 Tensor Gpt2Model::forward(
     std::span<const std::size_t> token_ids
 ) const {
-    return tied_embedding_logits(
-        run_transformer_stack(token_ids),
-        checkpoint_m.tensor("transformer.wte.weight")
+    return compute_tied_logits(
+        checkpoint_m,
+        run_transformer_stack(token_ids)
     );
 }
 
 Tensor Gpt2Model::forward_last_token_logits(
     std::span<const std::size_t> token_ids
 ) const {
-    return tied_embedding_logits(
-        extract_last_row(run_transformer_stack(token_ids)),
-        checkpoint_m.tensor("transformer.wte.weight")
+    return compute_tied_logits(
+        checkpoint_m,
+        extract_last_row(run_transformer_stack(token_ids))
     );
 }
 
@@ -489,10 +822,8 @@ Tensor Gpt2Model::run_cached_transformer_stack(
         sequence_start
     );
 
-    const Tensor token_state = embedding_lookup(
-        checkpoint_m.tensor("transformer.wte.weight"),
-        token_ids
-    );
+    const Tensor token_state =
+        lookup_token_embeddings(checkpoint_m, token_ids);
     const Tensor position_state = embedding_lookup(
         checkpoint_m.tensor("transformer.wpe.weight"),
         position_ids
@@ -505,12 +836,10 @@ Tensor Gpt2Model::run_cached_transformer_stack(
         static_cast<std::size_t>(config().head_count);
 
     for (std::size_t layer = 0; layer < layer_count; ++layer) {
-        const TransformerBlockParameters parameters =
-            bind_block(checkpoint_m, layer);
-
-        hidden_state = transformer_block(
+        hidden_state = run_cached_transformer_layer(
+            checkpoint_m,
+            layer,
             hidden_state,
-            parameters,
             head_count,
             cache.layers_m[layer]
         );
@@ -529,9 +858,9 @@ Tensor Gpt2Model::forward(
 ) const {
     const std::size_t start = validate_cached_forward(token_ids, cache);
     try {
-        Tensor logits = tied_embedding_logits(
-            run_cached_transformer_stack(token_ids, cache, start),
-            checkpoint_m.tensor("transformer.wte.weight")
+        Tensor logits = compute_tied_logits(
+            checkpoint_m,
+            run_cached_transformer_stack(token_ids, cache, start)
         );
         cache.owner_id_m = identity_m;
         return logits;
@@ -549,11 +878,11 @@ Tensor Gpt2Model::forward_last_token_logits(
 ) const {
     const std::size_t start = validate_cached_forward(token_ids, cache);
     try {
-        Tensor logits = tied_embedding_logits(
+        Tensor logits = compute_tied_logits(
+            checkpoint_m,
             extract_last_row(
                 run_cached_transformer_stack(token_ids, cache, start)
-            ),
-            checkpoint_m.tensor("transformer.wte.weight")
+            )
         );
         cache.owner_id_m = identity_m;
         return logits;

@@ -21,7 +21,13 @@ namespace {
 using gpt2_test::alternate_index_multiplier;
 using gpt2_test::make_checkpoint;
 using gpt2_test::make_model_tensors;
+using gpt2_test::QuantizationTarget;
+using gpt2_test::quantize_model_tensors;
+using gpt2_test::QuantizedFixtures;
 using gpt2_test::TemporaryCheckpoint;
+using gpt2_test::TensorFixture;
+using gpt2_test::tied_embedding_target;
+using gpt2_test::transformer_weight_targets;
 
 constexpr std::size_t fixture_context_length =
     gpt2_test::fixture_context_length;
@@ -99,6 +105,14 @@ gpt2::Gpt2Model load_fixture_model(
     return gpt2::Gpt2Model(gpt2::load_checkpoint(file.path()));
 }
 
+gpt2::Gpt2Model load_model(const std::vector<TensorFixture>& tensors) {
+    const TemporaryCheckpoint file(
+        make_checkpoint(tensors),
+        "gpt2-kv-cache-quantized-test-"
+    );
+    return gpt2::Gpt2Model(gpt2::load_checkpoint(file.path()));
+}
+
 std::span<const float> row_of(
     const gpt2::Tensor& logits,
     std::size_t row
@@ -161,6 +175,47 @@ void test_one_token_at_a_time_matches_uncached() {
         expect(
             cache.length() == position + 1,
             "the cache grows by one token per step"
+        );
+    }
+}
+
+// Mirrors test_one_token_at_a_time_matches_uncached for a fully
+// quantized model (transformer weights and wte): quantized_transformer_
+// block's cached and uncached overloads share the same append_to_cache/
+// extract_cached_head machinery the FP32 block does, so the same
+// exact bit-identity should hold at the full-model level, not only at
+// the attention/transformer-block level attention_test.cpp and
+// transformer_test.cpp already confirm.
+void test_quantized_one_token_at_a_time_matches_uncached() {
+    std::vector<QuantizationTarget> targets = transformer_weight_targets();
+    targets.push_back(tied_embedding_target());
+    const QuantizedFixtures fixtures = quantize_model_tensors(targets);
+    const gpt2::Gpt2Model model = load_model(fixtures.quantized);
+
+    const std::array<std::size_t, 5> tokens{2, 5, 1, 3, 0};
+    const gpt2::Tensor uncached = model.forward(tokens);
+
+    gpt2::KvCache cache(model.config());
+    for (std::size_t position = 0; position < tokens.size(); ++position) {
+        const std::span<const std::size_t> step(
+            tokens.data() + position,
+            1
+        );
+        const gpt2::Tensor cached = model.forward(step, cache);
+
+        expect(
+            cached.shape()[0] == 1,
+            "a quantized single-token step returns a single row"
+        );
+        expect_identical_bits(
+            all_of(cached),
+            row_of(uncached, position),
+            "a quantized model's cached step reproduces the uncached "
+            "logits exactly"
+        );
+        expect(
+            cache.length() == position + 1,
+            "the cache grows by one token per quantized step"
         );
     }
 }
@@ -461,6 +516,7 @@ int main() {
     try {
         test_cached_forward_matches_uncached();
         test_one_token_at_a_time_matches_uncached();
+        test_quantized_one_token_at_a_time_matches_uncached();
         test_mixed_chunk_sizes_match_uncached();
         test_last_token_logits_matches_forwards_last_row();
         test_last_token_logits_shares_forwards_validation();

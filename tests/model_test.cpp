@@ -21,8 +21,13 @@ using gpt2_test::find_tensor;
 using gpt2_test::make_checkpoint;
 using gpt2_test::make_model_tensors;
 using gpt2_test::make_tensor;
+using gpt2_test::QuantizationTarget;
+using gpt2_test::quantize_model_tensors;
+using gpt2_test::QuantizedFixtures;
 using gpt2_test::TemporaryCheckpoint;
 using gpt2_test::TensorFixture;
+using gpt2_test::tied_embedding_target;
+using gpt2_test::transformer_weight_targets;
 using gpt2_test::ValueKind;
 
 constexpr std::uint32_t vocabulary_size =
@@ -205,12 +210,162 @@ void test_model_rejects_invalid_token_sequences() {
     );
 }
 
+// Asserts that a quantized model's forward pass matches an FP32
+// model's forward pass computed over the same explicitly dequantized
+// weights -- the same cross-check tensor_ops_test.cpp/layers_test.cpp/
+// attention_test.cpp/transformer_test.cpp use for the individual
+// operations, now over the whole model. See ChannelQuantized's comment
+// (model_fixture.h) for why this should hold near-exactly rather than
+// only approximately: quantized_matmul dequantizes each weight with a
+// single `static_cast<float>(int8) * scale` before the same summation
+// loop matmul uses, so an operation built from these should reproduce
+// its FP32 sibling to within ordinary floating-point slack, not
+// quantization error.
+void expect_forward_matches_dequantized_reference(
+    const QuantizedFixtures& fixtures,
+    std::string_view message
+) {
+    const gpt2::Gpt2Model quantized_model = load_model(fixtures.quantized);
+    const gpt2::Gpt2Model reference_model =
+        load_model(fixtures.dequantized_reference);
+
+    const std::array<std::size_t, 3> token_ids{2, 5, 1};
+    const gpt2::Tensor quantized_logits =
+        quantized_model.forward(token_ids);
+    const gpt2::Tensor reference_logits =
+        reference_model.forward(token_ids);
+
+    expect(
+        quantized_logits.shape() == reference_logits.shape(),
+        message
+    );
+    for (std::size_t index = 0; index < quantized_logits.numel(); ++index) {
+        expect_near(
+            quantized_logits.at(index),
+            reference_logits.at(index),
+            1.0e-4F,
+            message
+        );
+    }
+}
+
+void test_quantized_transformer_weights_match_dequantized_reference() {
+    const QuantizedFixtures fixtures =
+        quantize_model_tensors(transformer_weight_targets());
+
+    expect_forward_matches_dequantized_reference(
+        fixtures,
+        "a transformer-quantized model (FP32 wte) matches the FP32 "
+        "model run over the same explicitly dequantized weights"
+    );
+}
+
+void test_fully_quantized_model_matches_dequantized_reference() {
+    std::vector<QuantizationTarget> targets = transformer_weight_targets();
+    targets.push_back(tied_embedding_target());
+    const QuantizedFixtures fixtures = quantize_model_tensors(targets);
+
+    expect_forward_matches_dequantized_reference(
+        fixtures,
+        "a fully-quantized model (transformer weights and wte) matches "
+        "the FP32 model run over the same explicitly dequantized "
+        "weights"
+    );
+}
+
+void test_quantized_only_tied_embedding_matches_dequantized_reference() {
+    const QuantizedFixtures fixtures =
+        quantize_model_tensors({tied_embedding_target()});
+
+    expect_forward_matches_dequantized_reference(
+        fixtures,
+        "a model quantizing only wte (FP32 transformer layers) matches "
+        "the FP32 model run over the same explicitly dequantized "
+        "weights"
+    );
+}
+
+void test_model_rejects_mixed_precision_within_a_layer() {
+    // Quantize only c_attn in layer 0; every other linear weight in
+    // that layer stays FP32. Neither transformer_block nor
+    // quantized_transformer_block can run a layer like this.
+    const QuantizedFixtures fixtures = quantize_model_tensors({
+        {"transformer.h.0.attn.c_attn.weight", 1},
+    });
+
+    expect_throws<std::invalid_argument>(
+        [&fixtures] {
+            static_cast<void>(load_model(fixtures.quantized));
+        },
+        "model rejects a layer that mixes float32 and int8 weights"
+    );
+}
+
+void test_model_rejects_inconsistent_layer_precision() {
+    // Layer 0 is fully quantized and internally consistent; layer 1 is
+    // left entirely FP32. tools/export_gpt2.py's --quantize flag
+    // applies to every transformer layer uniformly, so a checkpoint
+    // like this cannot come from that exporter.
+    std::vector<QuantizationTarget> targets{
+        {"transformer.h.0.attn.c_attn.weight", 1},
+        {"transformer.h.0.attn.c_proj.weight", 1},
+        {"transformer.h.0.mlp.c_fc.weight", 1},
+        {"transformer.h.0.mlp.c_proj.weight", 1},
+    };
+    const QuantizedFixtures fixtures = quantize_model_tensors(targets);
+
+    expect_throws<std::invalid_argument>(
+        [&fixtures] {
+            static_cast<void>(load_model(fixtures.quantized));
+        },
+        "model rejects transformer layers that disagree on precision"
+    );
+}
+
+void test_model_rejects_quantization_scale_on_the_wrong_axis() {
+    QuantizedFixtures fixtures =
+        quantize_model_tensors({tied_embedding_target()});
+    TensorFixture& scale = find_tensor(
+        fixtures.quantized,
+        "transformer.wte.weight.quant_scale"
+    );
+    expect(
+        scale.values.size() == vocabulary_size,
+        "the wte scale fixture starts with one entry per vocabulary "
+        "word"
+    );
+
+    // embedding_size (4) is a genuine dimension of wte's [7, 4] shape,
+    // so checkpoint.cpp's own generic "matches one of the tensor's
+    // dimensions" check would accept this; only the model's
+    // axis-specific check (wte's channel axis is its rows, not its
+    // columns -- see docs/quantization.md) should catch it.
+    constexpr std::uint32_t embedding_size =
+        gpt2_test::fixture_embedding_size;
+    scale.shape = {static_cast<std::uint64_t>(embedding_size)};
+    scale.values.assign(embedding_size, 1.0F);
+
+    expect_throws<std::invalid_argument>(
+        [&fixtures] {
+            static_cast<void>(load_model(fixtures.quantized));
+        },
+        "model rejects a wte quantization scale sized for the wrong "
+        "axis"
+    );
+}
+
 }  // namespace
 
 int main() {
     test_complete_forward_matches_hugging_face();
     test_model_rejects_invalid_checkpoint_schema();
     test_model_rejects_invalid_token_sequences();
+    test_quantized_transformer_weights_match_dequantized_reference();
+    test_fully_quantized_model_matches_dequantized_reference();
+    test_quantized_only_tied_embedding_matches_dequantized_reference();
+    test_model_rejects_mixed_precision_within_a_layer();
+    test_model_rejects_inconsistent_layer_precision();
+    test_model_rejects_quantization_scale_on_the_wrong_axis();
 
     if (failure_count != 0) {
         std::cerr << failure_count << " model test assertion(s) failed\n";

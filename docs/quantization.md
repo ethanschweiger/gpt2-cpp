@@ -128,12 +128,72 @@ style the FP32 originals' own tests use), and a direct cross-check
 against calling the *original* FP32 operation on an explicitly
 dequantized copy of the same weight — so a quantized operation's
 result is checked against the un-quantized one it is standing in for,
-not only against its own arithmetic restated.
+not only against its own arithmetic restated. `quantized_multi_head_
+self_attention` (`attention.h`) and `quantized_feed_forward`/
+`quantized_transformer_block` (`transformer.h`) extend the same three
+operations up through a whole transformer block, verified the same
+two ways plus a bit-identical cached-vs-uncached check mirroring the
+FP32 attention cache's own.
 
-`Gpt2Model` does not yet call any of these. Nothing in the model
-currently inspects whether a checkpoint tensor is FP32 or int8 — that
-dispatch, and running the two real quantized checkpoints below through
-it end to end, is the next step.
+## Gpt2Model dispatch
+
+`Gpt2Model` inspects each of the five quantizable tensors independently
+through `Checkpoint::contains_int8`, so a single model transparently
+runs any of the three configs above (or, for testing, any other
+consistent mix) without the caller telling it which: `forward()`,
+`forward_last_token_logits()` and their cached overloads are unchanged
+at the call site. Construction validates two invariants a naive
+per-tensor dispatch would miss:
+
+- **A layer's four linear weights share one precision.** `transformer_
+  block` and `quantized_transformer_block` each bind a whole block to
+  one precision; there is no function to run a layer whose weights
+  disagree, so a checkpoint like that is rejected rather than silently
+  misrun.
+- **Every transformer layer shares the checkpoint's transformer-weight
+  precision.** `--quantize` (`tools/export_gpt2.py`) applies to every
+  layer uniformly, so a checkpoint where layers disagree cannot come
+  from that exporter and is rejected too. `wte`'s own precision is
+  checked independently of the transformer layers' — config 2 below
+  keeps it FP32 while every layer is int8 — and each of the five
+  tensors' quantization-scale length is checked against *its own*
+  channel axis (row for `wte`, column for the other four), not merely
+  against "one of the tensor's dimensions" the way the checkpoint
+  format's own generic check does; see the note on `c_proj`'s square
+  weight matrix above for why that distinction matters.
+
+`tests/model_test.cpp` and `tests/kv_cache_test.cpp` cover this the
+same way the lower layers were covered: a small quantized checkpoint's
+forward pass is checked against an FP32 checkpoint built from the same
+weights' explicitly dequantized values (in three configurations —
+transformer-only, wte-only, and both), a cached one-token-at-a-time
+run is checked bit-for-bit against the uncached forward pass, and
+malformed checkpoints (mixed precision within a layer, layers that
+disagree with each other, a quantization scale sized for the wrong
+axis) are confirmed rejected.
+
+### Real-model verification
+
+Both real quantized checkpoints below load through `Gpt2Model` and run
+end to end — the first time either has been used for inference rather
+than only inspected by a standalone loader. Run with the same
+"Hello, world!" prompt (`gpt2_real_model_runner`, already built by
+`GPT2_ENABLE_GPT2_SMALL_PARITY`) as the pinned FP32 checkpoint, both
+produce finite `[4, 50257]` logits that stay close to it:
+
+```text
+config 2 - int8 transformer, FP32 wte:  mean |error| 8.2e-1, max |error| 2.2e0
+config 3 - int8 transformer and wte:    mean |error| 8.9e-1, max |error| 3.3e0
+```
+
+This is a wiring spot check on four tokens, not the accuracy benchmark
+— it confirms the model loads and runs both real checkpoints correctly
+and produces sane, finite, non-degenerate output of the right order of
+magnitude for weights-only int8 quantization with no outlier handling,
+not a statistically meaningful accuracy measurement. The formal
+benchmark (mean/maximum logit error, top-1/top-5 agreement, runtime
+memory, tokens per second, optionally perplexity, all over a real
+evaluation set) is the next step; see [Benchmarking](benchmarks.md).
 
 ## Real GPT-2 Small checkpoint sizes
 
@@ -158,8 +218,8 @@ excluded from that count.
 
 Accuracy (mean and maximum logit error, top-1 and top-5 agreement
 against the FP32 baseline) and runtime speed and memory are measured
-separately, once the model-loading side of this milestone can run
-these checkpoints — see [Benchmarking](benchmarks.md).
+formally as their own benchmark — see [Benchmarking](benchmarks.md) —
+though a small real-model spot check already appears above.
 
 ## Testing
 
@@ -193,3 +253,15 @@ these checkpoints — see [Benchmarking](benchmarks.md).
   dequantized with *its own* row's scale rather than, say, the scale
   at its position in the output — the specific mistake a token order
   that happened to match row order would hide.
+- `tests/attention_test.cpp` and `tests/transformer_test.cpp` extend
+  the same two checks up through `quantized_multi_head_self_attention`
+  and `quantized_transformer_block`, plus a bit-identical cached-vs-
+  uncached check mirroring the FP32 attention cache's own.
+- `tests/model_test.cpp` and `tests/kv_cache_test.cpp` cover
+  `Gpt2Model`'s dispatch: a small quantized checkpoint's forward pass
+  matches an FP32 checkpoint built from the same weights' explicitly
+  dequantized values (transformer-only, wte-only, and both quantized),
+  a cached one-token-at-a-time run matches the uncached forward pass
+  bit-for-bit, and a checkpoint that mixes precision within a layer,
+  across layers, or gives a quantization scale the wrong axis length is
+  rejected at construction.
