@@ -36,9 +36,41 @@ struct TransformerBlockParameters {
     FeedForwardParameters feed_forward;
 };
 
+// Quantized siblings of the four structs above. A LayerNorm's weight
+// and bias are always FP32 in this project (see docs/quantization.md),
+// so LayerNormParameters is reused unchanged; only the four linear
+// projections inside a block ever become QuantizedLinearParameters.
+struct QuantizedLinearParameters {
+    const Int8Tensor& weight;
+    const Tensor& weight_scale;
+    const Tensor& bias;
+};
+
+struct QuantizedAttentionParameters {
+    QuantizedLinearParameters qkv;
+    QuantizedLinearParameters output;
+};
+
+struct QuantizedFeedForwardParameters {
+    QuantizedLinearParameters expansion;
+    QuantizedLinearParameters projection;
+};
+
+struct QuantizedTransformerBlockParameters {
+    LayerNormParameters attention_norm;
+    QuantizedAttentionParameters attention;
+    LayerNormParameters feed_forward_norm;
+    QuantizedFeedForwardParameters feed_forward;
+};
+
 Tensor feed_forward(
     const Tensor& input,
     const FeedForwardParameters& parameters
+);
+
+Tensor quantized_feed_forward(
+    const Tensor& input,
+    const QuantizedFeedForwardParameters& parameters
 );
 
 Tensor transformer_block(
@@ -52,6 +84,22 @@ Tensor transformer_block(
 Tensor transformer_block(
     const Tensor& input,
     const TransformerBlockParameters& parameters,
+    std::size_t head_count,
+    AttentionCache& cache
+);
+
+// Like transformer_block(), but every linear projection in the block
+// is per-output-channel-quantized int8, dequantized as
+// quantized_linear (layers.h) uses it. See docs/quantization.md.
+Tensor quantized_transformer_block(
+    const Tensor& input,
+    const QuantizedTransformerBlockParameters& parameters,
+    std::size_t head_count
+);
+
+Tensor quantized_transformer_block(
+    const Tensor& input,
+    const QuantizedTransformerBlockParameters& parameters,
     std::size_t head_count,
     AttentionCache& cache
 );

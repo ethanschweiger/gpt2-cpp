@@ -261,12 +261,10 @@ struct AttentionShapes {
     std::size_t head_size;
 };
 
-AttentionShapes validate_attention(
+// The part of shape validation that never depends on whether the
+// weights are FP32 or quantized: only the input and the head count.
+AttentionShapes derive_attention_shapes(
     const Tensor& input,
-    const Tensor& qkv_weight,
-    const Tensor& qkv_bias,
-    const Tensor& output_weight,
-    const Tensor& output_bias,
     std::size_t head_count
 ) {
     if (input.rank() != 2) {
@@ -297,10 +295,27 @@ AttentionShapes validate_attention(
         );
     }
 
-    const std::size_t qkv_size = embedding_size * 3;
+    return AttentionShapes{
+        sequence_length,
+        embedding_size,
+        embedding_size / head_count
+    };
+}
+
+AttentionShapes validate_attention(
+    const Tensor& input,
+    const Tensor& qkv_weight,
+    const Tensor& qkv_bias,
+    const Tensor& output_weight,
+    const Tensor& output_bias,
+    std::size_t head_count
+) {
+    const AttentionShapes shapes =
+        derive_attention_shapes(input, head_count);
+    const std::size_t qkv_size = shapes.embedding_size * 3;
 
     if (qkv_weight.rank() != 2 ||
-        qkv_weight.shape()[0] != embedding_size ||
+        qkv_weight.shape()[0] != shapes.embedding_size ||
         qkv_weight.shape()[1] != qkv_size) {
         throw std::invalid_argument(
             "QKV weight must have shape [embedding size, 3 * embedding size]"
@@ -315,25 +330,81 @@ AttentionShapes validate_attention(
     }
 
     if (output_weight.rank() != 2 ||
-        output_weight.shape()[0] != embedding_size ||
-        output_weight.shape()[1] != embedding_size) {
+        output_weight.shape()[0] != shapes.embedding_size ||
+        output_weight.shape()[1] != shapes.embedding_size) {
         throw std::invalid_argument(
             "attention output weight must have shape [embedding size, embedding size]"
         );
     }
 
     if (output_bias.rank() != 1 ||
-        output_bias.numel() != embedding_size) {
+        output_bias.numel() != shapes.embedding_size) {
         throw std::invalid_argument(
             "attention output bias must match the embedding size"
         );
     }
 
-    return AttentionShapes{
-        sequence_length,
-        embedding_size,
-        embedding_size / head_count
-    };
+    return shapes;
+}
+
+AttentionShapes validate_quantized_attention(
+    const Tensor& input,
+    const Int8Tensor& qkv_weight,
+    const Tensor& qkv_scale,
+    const Tensor& qkv_bias,
+    const Int8Tensor& output_weight,
+    const Tensor& output_scale,
+    const Tensor& output_bias,
+    std::size_t head_count
+) {
+    const AttentionShapes shapes =
+        derive_attention_shapes(input, head_count);
+    const std::size_t qkv_size = shapes.embedding_size * 3;
+
+    if (qkv_weight.rank() != 2 ||
+        qkv_weight.shape()[0] != shapes.embedding_size ||
+        qkv_weight.shape()[1] != qkv_size) {
+        throw std::invalid_argument(
+            "QKV weight must have shape [embedding size, 3 * embedding size]"
+        );
+    }
+
+    if (qkv_scale.rank() != 1 || qkv_scale.numel() != qkv_size) {
+        throw std::invalid_argument(
+            "QKV scale must have 3 * embedding size values"
+        );
+    }
+
+    if (qkv_bias.rank() != 1 ||
+        qkv_bias.numel() != qkv_size) {
+        throw std::invalid_argument(
+            "QKV bias must have 3 * embedding size values"
+        );
+    }
+
+    if (output_weight.rank() != 2 ||
+        output_weight.shape()[0] != shapes.embedding_size ||
+        output_weight.shape()[1] != shapes.embedding_size) {
+        throw std::invalid_argument(
+            "attention output weight must have shape [embedding size, embedding size]"
+        );
+    }
+
+    if (output_scale.rank() != 1 ||
+        output_scale.numel() != shapes.embedding_size) {
+        throw std::invalid_argument(
+            "attention output scale must match the embedding size"
+        );
+    }
+
+    if (output_bias.rank() != 1 ||
+        output_bias.numel() != shapes.embedding_size) {
+        throw std::invalid_argument(
+            "attention output bias must match the embedding size"
+        );
+    }
+
+    return shapes;
 }
 
 }  // namespace
@@ -473,6 +544,151 @@ Tensor multi_head_self_attention(
 
     cache.length_m = total;
     return linear(merged, output_weight, output_bias);
+}
+
+Tensor quantized_multi_head_self_attention(
+    const Tensor& input,
+    const Int8Tensor& qkv_weight,
+    const Tensor& qkv_scale,
+    const Tensor& qkv_bias,
+    const Int8Tensor& output_weight,
+    const Tensor& output_scale,
+    const Tensor& output_bias,
+    std::size_t head_count
+) {
+    const AttentionShapes shapes = validate_quantized_attention(
+        input,
+        qkv_weight,
+        qkv_scale,
+        qkv_bias,
+        output_weight,
+        output_scale,
+        output_bias,
+        head_count
+    );
+
+    const Tensor combined_qkv =
+        quantized_linear(input, qkv_weight, qkv_scale, qkv_bias);
+
+    Tensor merged({shapes.sequence_length, shapes.embedding_size});
+
+    for (std::size_t head = 0; head < head_count; ++head) {
+        const Tensor query = extract_head(
+            combined_qkv,
+            0,
+            head,
+            shapes.head_size
+        );
+        const Tensor key = extract_head(
+            combined_qkv,
+            shapes.embedding_size,
+            head,
+            shapes.head_size
+        );
+        const Tensor value = extract_head(
+            combined_qkv,
+            2 * shapes.embedding_size,
+            head,
+            shapes.head_size
+        );
+
+        const Tensor head_output =
+            causal_scaled_dot_product_attention(query, key, value);
+
+        store_head(merged, head_output, head);
+    }
+
+    return quantized_linear(merged, output_weight, output_scale, output_bias);
+}
+
+Tensor quantized_multi_head_self_attention(
+    const Tensor& input,
+    const Int8Tensor& qkv_weight,
+    const Tensor& qkv_scale,
+    const Tensor& qkv_bias,
+    const Int8Tensor& output_weight,
+    const Tensor& output_scale,
+    const Tensor& output_bias,
+    std::size_t head_count,
+    AttentionCache& cache
+) {
+    const AttentionShapes shapes = validate_quantized_attention(
+        input,
+        qkv_weight,
+        qkv_scale,
+        qkv_bias,
+        output_weight,
+        output_scale,
+        output_bias,
+        head_count
+    );
+
+    if (cache.embedding_size() != shapes.embedding_size) {
+        throw std::invalid_argument(
+            "attention cache width does not match the embedding size"
+        );
+    }
+
+    if (cache.length_m > cache.capacity() ||
+        shapes.sequence_length > cache.capacity() - cache.length_m) {
+        throw std::invalid_argument(
+            "attention cache has no room for the new tokens"
+        );
+    }
+
+    const Tensor combined_qkv =
+        quantized_linear(input, qkv_weight, qkv_scale, qkv_bias);
+
+    const std::size_t query_offset = cache.length_m;
+    append_to_cache(
+        cache.keys_m,
+        combined_qkv,
+        shapes.embedding_size,
+        query_offset
+    );
+    append_to_cache(
+        cache.values_m,
+        combined_qkv,
+        2 * shapes.embedding_size,
+        query_offset
+    );
+    const std::size_t total = query_offset + shapes.sequence_length;
+
+    Tensor merged({shapes.sequence_length, shapes.embedding_size});
+
+    for (std::size_t head = 0; head < head_count; ++head) {
+        const Tensor query = extract_head(
+            combined_qkv,
+            0,
+            head,
+            shapes.head_size
+        );
+        const Tensor key = extract_cached_head(
+            cache.keys_m,
+            head,
+            shapes.head_size,
+            total
+        );
+        const Tensor value = extract_cached_head(
+            cache.values_m,
+            head,
+            shapes.head_size,
+            total
+        );
+
+        const Tensor head_output =
+            causal_scaled_dot_product_attention(
+                query,
+                key,
+                value,
+                query_offset
+            );
+
+        store_head(merged, head_output, head);
+    }
+
+    cache.length_m = total;
+    return quantized_linear(merged, output_weight, output_scale, output_bias);
 }
 
 }  // namespace gpt2

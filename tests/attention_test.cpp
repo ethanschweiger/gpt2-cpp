@@ -2,11 +2,14 @@
 
 #include <array>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <exception>
 #include <iostream>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -303,6 +306,335 @@ void test_multi_head_attention_matches_reference_layout() {
     );
 }
 
+// A small deterministic sequence, distinct per call site (via `seed`),
+// standing in for real trained weights: varied in sign and magnitude,
+// reproducible, with no meaning beyond exercising every code path with
+// numbers that are not all equal or all one sign.
+std::int8_t deterministic_int8(std::size_t index, std::size_t seed) {
+    const std::size_t encoded = (index * 37 + seed * 11) % 251;
+    return static_cast<std::int8_t>(static_cast<int>(encoded) - 125);
+}
+
+std::vector<std::int8_t> make_deterministic_int8_values(
+    std::size_t count,
+    std::size_t seed
+) {
+    std::vector<std::int8_t> values(count);
+    for (std::size_t index = 0; index < count; ++index) {
+        values[index] = deterministic_int8(index, seed);
+    }
+    return values;
+}
+
+float deterministic_scale(std::size_t index, std::size_t seed) {
+    return 0.01F + 0.003F *
+        static_cast<float>((index * 7 + seed * 13) % 17);
+}
+
+std::vector<float> make_deterministic_scale_values(
+    std::size_t count,
+    std::size_t seed
+) {
+    std::vector<float> values(count);
+    for (std::size_t index = 0; index < count; ++index) {
+        values[index] = deterministic_scale(index, seed);
+    }
+    return values;
+}
+
+float deterministic_float(std::size_t index, std::size_t seed) {
+    const std::size_t encoded = (index * 17 + seed * 5) % 23;
+    return (static_cast<float>(encoded) - 11.0F) / 4.0F;
+}
+
+std::vector<float> make_deterministic_float_values(
+    std::size_t count,
+    std::size_t seed
+) {
+    std::vector<float> values(count);
+    for (std::size_t index = 0; index < count; ++index) {
+        values[index] = deterministic_float(index, seed);
+    }
+    return values;
+}
+
+gpt2::Tensor dequantize(
+    const gpt2::Int8Tensor& quantized,
+    const gpt2::Tensor& scale
+) {
+    const std::size_t rows = quantized.shape()[0];
+    const std::size_t columns = quantized.shape()[1];
+    gpt2::Tensor result({rows, columns});
+
+    for (std::size_t row = 0; row < rows; ++row) {
+        for (std::size_t column = 0; column < columns; ++column) {
+            const std::array<std::size_t, 2> index{row, column};
+            result.at(index) =
+                static_cast<float>(
+                    quantized.data()[row * columns + column]
+                ) * scale.at(column);
+        }
+    }
+
+    return result;
+}
+
+struct QuantizedAttentionFixture {
+    gpt2::Tensor input;
+    gpt2::Int8Tensor qkv_weight;
+    gpt2::Tensor qkv_scale;
+    gpt2::Tensor qkv_bias;
+    gpt2::Int8Tensor output_weight;
+    gpt2::Tensor output_scale;
+    gpt2::Tensor output_bias;
+    gpt2::Tensor dequantized_qkv_weight;
+    gpt2::Tensor dequantized_output_weight;
+};
+
+QuantizedAttentionFixture make_quantized_attention_fixture(
+    std::size_t sequence_length,
+    std::size_t embedding_size
+) {
+    const std::size_t qkv_size = embedding_size * 3;
+
+    gpt2::Int8Tensor qkv_weight(
+        {embedding_size, qkv_size},
+        make_deterministic_int8_values(embedding_size * qkv_size, 1)
+    );
+    gpt2::Tensor qkv_scale(
+        {qkv_size},
+        make_deterministic_scale_values(qkv_size, 2)
+    );
+    gpt2::Int8Tensor output_weight(
+        {embedding_size, embedding_size},
+        make_deterministic_int8_values(embedding_size * embedding_size, 3)
+    );
+    gpt2::Tensor output_scale(
+        {embedding_size},
+        make_deterministic_scale_values(embedding_size, 4)
+    );
+
+    QuantizedAttentionFixture fixture{
+        gpt2::Tensor(
+            {sequence_length, embedding_size},
+            make_deterministic_float_values(
+                sequence_length * embedding_size, 0
+            )
+        ),
+        std::move(qkv_weight),
+        std::move(qkv_scale),
+        gpt2::Tensor(
+            {qkv_size},
+            make_deterministic_float_values(qkv_size, 5)
+        ),
+        std::move(output_weight),
+        std::move(output_scale),
+        gpt2::Tensor(
+            {embedding_size},
+            make_deterministic_float_values(embedding_size, 6)
+        ),
+        gpt2::Tensor({embedding_size, qkv_size}),
+        gpt2::Tensor({embedding_size, embedding_size}),
+    };
+
+    fixture.dequantized_qkv_weight =
+        dequantize(fixture.qkv_weight, fixture.qkv_scale);
+    fixture.dequantized_output_weight =
+        dequantize(fixture.output_weight, fixture.output_scale);
+
+    return fixture;
+}
+
+void test_quantized_multi_head_attention_matches_dequantized_reference() {
+    const QuantizedAttentionFixture fixture =
+        make_quantized_attention_fixture(3, 4);
+
+    const gpt2::Tensor quantized_result =
+        gpt2::quantized_multi_head_self_attention(
+            fixture.input,
+            fixture.qkv_weight,
+            fixture.qkv_scale,
+            fixture.qkv_bias,
+            fixture.output_weight,
+            fixture.output_scale,
+            fixture.output_bias,
+            2
+        );
+    const gpt2::Tensor plain_result = gpt2::multi_head_self_attention(
+        fixture.input,
+        fixture.dequantized_qkv_weight,
+        fixture.qkv_bias,
+        fixture.dequantized_output_weight,
+        fixture.output_bias,
+        2
+    );
+
+    expect(
+        quantized_result.shape() == plain_result.shape(),
+        "quantized multi-head attention matches the plain result's shape"
+    );
+    for (std::size_t index = 0; index < quantized_result.numel(); ++index) {
+        expect_near(
+            quantized_result.at(index),
+            plain_result.at(index),
+            1.0e-3F,
+            "quantized multi-head attention matches multi-head "
+            "attention over explicitly dequantized weights"
+        );
+    }
+}
+
+void test_quantized_multi_head_attention_cached_matches_uncached() {
+    const QuantizedAttentionFixture fixture =
+        make_quantized_attention_fixture(4, 4);
+
+    const gpt2::Tensor uncached = gpt2::quantized_multi_head_self_attention(
+        fixture.input,
+        fixture.qkv_weight,
+        fixture.qkv_scale,
+        fixture.qkv_bias,
+        fixture.output_weight,
+        fixture.output_scale,
+        fixture.output_bias,
+        2
+    );
+
+    gpt2::AttentionCache cache(fixture.input.shape()[0], 4);
+    gpt2::Tensor cached_result({fixture.input.shape()[0], 4});
+    for (std::size_t position = 0;
+         position < fixture.input.shape()[0];
+         ++position) {
+        gpt2::Tensor step({1, 4});
+        for (std::size_t feature = 0; feature < 4; ++feature) {
+            const std::array<std::size_t, 2> step_index{0, feature};
+            const std::array<std::size_t, 2> source_index{
+                position, feature
+            };
+            step.at(step_index) = fixture.input.at(source_index);
+        }
+
+        const gpt2::Tensor step_result =
+            gpt2::quantized_multi_head_self_attention(
+                step,
+                fixture.qkv_weight,
+                fixture.qkv_scale,
+                fixture.qkv_bias,
+                fixture.output_weight,
+                fixture.output_scale,
+                fixture.output_bias,
+                2,
+                cache
+            );
+
+        for (std::size_t feature = 0; feature < 4; ++feature) {
+            const std::array<std::size_t, 2> destination_index{
+                position, feature
+            };
+            cached_result.at(destination_index) = step_result.at(
+                std::array<std::size_t, 2>{0, feature}
+            );
+        }
+    }
+
+    for (std::size_t index = 0; index < uncached.numel(); ++index) {
+        expect(
+            uncached.at(index) == cached_result.at(index),
+            "quantized attention's cached, one-token-at-a-time path "
+            "reproduces the uncached result exactly"
+        );
+    }
+}
+
+void expect_invalid_quantized_multi_head_attention(
+    const gpt2::Tensor& input,
+    const gpt2::Int8Tensor& qkv_weight,
+    const gpt2::Tensor& qkv_scale,
+    const gpt2::Tensor& qkv_bias,
+    const gpt2::Int8Tensor& output_weight,
+    const gpt2::Tensor& output_scale,
+    const gpt2::Tensor& output_bias,
+    std::size_t head_count,
+    std::string_view message
+) {
+    expect_throws<std::invalid_argument>(
+        [&] {
+            static_cast<void>(gpt2::quantized_multi_head_self_attention(
+                input,
+                qkv_weight,
+                qkv_scale,
+                qkv_bias,
+                output_weight,
+                output_scale,
+                output_bias,
+                head_count
+            ));
+        },
+        message
+    );
+}
+
+void test_quantized_multi_head_attention_rejects_invalid_configuration() {
+    const gpt2::Tensor input({1, 2});
+    const gpt2::Int8Tensor qkv_weight(
+        {2, 6},
+        make_deterministic_int8_values(12, 10)
+    );
+    const gpt2::Tensor qkv_scale(
+        {6},
+        make_deterministic_scale_values(6, 11)
+    );
+    const gpt2::Tensor qkv_bias({6});
+    const gpt2::Int8Tensor output_weight(
+        {2, 2},
+        make_deterministic_int8_values(4, 12)
+    );
+    const gpt2::Tensor output_scale(
+        {2},
+        make_deterministic_scale_values(2, 13)
+    );
+    const gpt2::Tensor output_bias({2});
+
+    expect_invalid_quantized_multi_head_attention(
+        input,
+        qkv_weight,
+        qkv_scale,
+        qkv_bias,
+        output_weight,
+        output_scale,
+        output_bias,
+        0,
+        "quantized multi-head attention rejects zero heads"
+    );
+
+    const gpt2::Tensor bad_qkv_scale({5}, std::vector<float>(5, 1.0F));
+    expect_invalid_quantized_multi_head_attention(
+        input,
+        qkv_weight,
+        bad_qkv_scale,
+        qkv_bias,
+        output_weight,
+        output_scale,
+        output_bias,
+        1,
+        "quantized multi-head attention rejects an incorrect QKV scale "
+        "size"
+    );
+
+    const gpt2::Tensor bad_output_scale({3}, std::vector<float>(3, 1.0F));
+    expect_invalid_quantized_multi_head_attention(
+        input,
+        qkv_weight,
+        qkv_scale,
+        qkv_bias,
+        output_weight,
+        bad_output_scale,
+        output_bias,
+        1,
+        "quantized multi-head attention rejects an incorrect output "
+        "scale size"
+    );
+}
+
 void test_multi_head_attention_applies_biases_and_output_projection() {
     const gpt2::Tensor input({1, 2});
     const gpt2::Tensor qkv_weight({2, 6});
@@ -487,6 +819,9 @@ int main() {
     test_multi_head_attention_matches_reference_layout();
     test_multi_head_attention_applies_biases_and_output_projection();
     test_multi_head_attention_rejects_invalid_configuration();
+    test_quantized_multi_head_attention_matches_dequantized_reference();
+    test_quantized_multi_head_attention_cached_matches_uncached();
+    test_quantized_multi_head_attention_rejects_invalid_configuration();
 
     if (failure_count != 0) {
         std::cerr << failure_count << " attention test assertion(s) failed\n";

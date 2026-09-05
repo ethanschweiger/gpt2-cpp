@@ -334,6 +334,401 @@ void test_transformer_block_rejects_invalid_input() {
     );
 }
 
+// A small deterministic sequence, distinct per call site (via `seed`),
+// standing in for real trained weights: varied in sign and magnitude,
+// reproducible, with no meaning beyond exercising every code path with
+// numbers that are not all equal or all one sign.
+std::int8_t deterministic_int8(std::size_t index, std::size_t seed) {
+    const std::size_t encoded = (index * 37 + seed * 11) % 251;
+    return static_cast<std::int8_t>(static_cast<int>(encoded) - 125);
+}
+
+std::vector<std::int8_t> make_deterministic_int8_values(
+    std::size_t count,
+    std::size_t seed
+) {
+    std::vector<std::int8_t> values(count);
+    for (std::size_t index = 0; index < count; ++index) {
+        values[index] = deterministic_int8(index, seed);
+    }
+    return values;
+}
+
+float deterministic_scale(std::size_t index, std::size_t seed) {
+    return 0.01F + 0.003F *
+        static_cast<float>((index * 7 + seed * 13) % 17);
+}
+
+std::vector<float> make_deterministic_scale_values(
+    std::size_t count,
+    std::size_t seed
+) {
+    std::vector<float> values(count);
+    for (std::size_t index = 0; index < count; ++index) {
+        values[index] = deterministic_scale(index, seed);
+    }
+    return values;
+}
+
+float deterministic_float(std::size_t index, std::size_t seed) {
+    const std::size_t encoded = (index * 17 + seed * 5) % 23;
+    return (static_cast<float>(encoded) - 11.0F) / 4.0F;
+}
+
+std::vector<float> make_deterministic_float_values(
+    std::size_t count,
+    std::size_t seed
+) {
+    std::vector<float> values(count);
+    for (std::size_t index = 0; index < count; ++index) {
+        values[index] = deterministic_float(index, seed);
+    }
+    return values;
+}
+
+gpt2::Tensor dequantize(
+    const gpt2::Int8Tensor& quantized,
+    const gpt2::Tensor& scale
+) {
+    const std::size_t rows = quantized.shape()[0];
+    const std::size_t columns = quantized.shape()[1];
+    gpt2::Tensor result({rows, columns});
+
+    for (std::size_t row = 0; row < rows; ++row) {
+        for (std::size_t column = 0; column < columns; ++column) {
+            const std::array<std::size_t, 2> index{row, column};
+            result.at(index) =
+                static_cast<float>(
+                    quantized.data()[row * columns + column]
+                ) * scale.at(column);
+        }
+    }
+
+    return result;
+}
+
+struct QuantizedTransformerBlockFixture {
+    gpt2::Tensor input;
+    gpt2::Tensor norm_weight;
+    gpt2::Tensor norm_bias;
+    gpt2::Int8Tensor qkv_weight;
+    gpt2::Tensor qkv_scale;
+    gpt2::Tensor qkv_bias;
+    gpt2::Int8Tensor attention_output_weight;
+    gpt2::Tensor attention_output_scale;
+    gpt2::Tensor attention_output_bias;
+    gpt2::Int8Tensor expansion_weight;
+    gpt2::Tensor expansion_scale;
+    gpt2::Tensor expansion_bias;
+    gpt2::Int8Tensor projection_weight;
+    gpt2::Tensor projection_scale;
+    gpt2::Tensor projection_bias;
+};
+
+QuantizedTransformerBlockFixture make_quantized_transformer_block_fixture(
+    std::size_t sequence_length,
+    std::size_t embedding_size,
+    std::size_t feed_forward_size
+) {
+    const std::size_t qkv_size = embedding_size * 3;
+
+    return QuantizedTransformerBlockFixture{
+        gpt2::Tensor(
+            {sequence_length, embedding_size},
+            make_deterministic_float_values(
+                sequence_length * embedding_size, 0
+            )
+        ),
+        gpt2::Tensor(
+            {embedding_size},
+            std::vector<float>(embedding_size, 1.0F)
+        ),
+        gpt2::Tensor({embedding_size}),
+        gpt2::Int8Tensor(
+            {embedding_size, qkv_size},
+            make_deterministic_int8_values(embedding_size * qkv_size, 1)
+        ),
+        gpt2::Tensor({qkv_size}, make_deterministic_scale_values(qkv_size, 2)),
+        gpt2::Tensor({qkv_size}, make_deterministic_float_values(qkv_size, 3)),
+        gpt2::Int8Tensor(
+            {embedding_size, embedding_size},
+            make_deterministic_int8_values(embedding_size * embedding_size, 4)
+        ),
+        gpt2::Tensor(
+            {embedding_size},
+            make_deterministic_scale_values(embedding_size, 5)
+        ),
+        gpt2::Tensor(
+            {embedding_size},
+            make_deterministic_float_values(embedding_size, 6)
+        ),
+        gpt2::Int8Tensor(
+            {embedding_size, feed_forward_size},
+            make_deterministic_int8_values(
+                embedding_size * feed_forward_size, 7
+            )
+        ),
+        gpt2::Tensor(
+            {feed_forward_size},
+            make_deterministic_scale_values(feed_forward_size, 8)
+        ),
+        gpt2::Tensor(
+            {feed_forward_size},
+            make_deterministic_float_values(feed_forward_size, 9)
+        ),
+        gpt2::Int8Tensor(
+            {feed_forward_size, embedding_size},
+            make_deterministic_int8_values(
+                feed_forward_size * embedding_size, 10
+            )
+        ),
+        gpt2::Tensor(
+            {embedding_size},
+            make_deterministic_scale_values(embedding_size, 11)
+        ),
+        gpt2::Tensor(
+            {embedding_size},
+            make_deterministic_float_values(embedding_size, 12)
+        ),
+    };
+}
+
+gpt2::QuantizedTransformerBlockParameters as_quantized_parameters(
+    const QuantizedTransformerBlockFixture& fixture
+) {
+    return gpt2::QuantizedTransformerBlockParameters{
+        {fixture.norm_weight, fixture.norm_bias},
+        {
+            {fixture.qkv_weight, fixture.qkv_scale, fixture.qkv_bias},
+            {
+                fixture.attention_output_weight,
+                fixture.attention_output_scale,
+                fixture.attention_output_bias,
+            },
+        },
+        {fixture.norm_weight, fixture.norm_bias},
+        {
+            {
+                fixture.expansion_weight,
+                fixture.expansion_scale,
+                fixture.expansion_bias,
+            },
+            {
+                fixture.projection_weight,
+                fixture.projection_scale,
+                fixture.projection_bias,
+            },
+        },
+    };
+}
+
+gpt2::TransformerBlockParameters as_dequantized_parameters(
+    const QuantizedTransformerBlockFixture& fixture,
+    gpt2::Tensor& dequantized_qkv_weight,
+    gpt2::Tensor& dequantized_attention_output_weight,
+    gpt2::Tensor& dequantized_expansion_weight,
+    gpt2::Tensor& dequantized_projection_weight
+) {
+    dequantized_qkv_weight =
+        dequantize(fixture.qkv_weight, fixture.qkv_scale);
+    dequantized_attention_output_weight = dequantize(
+        fixture.attention_output_weight,
+        fixture.attention_output_scale
+    );
+    dequantized_expansion_weight =
+        dequantize(fixture.expansion_weight, fixture.expansion_scale);
+    dequantized_projection_weight =
+        dequantize(fixture.projection_weight, fixture.projection_scale);
+
+    return gpt2::TransformerBlockParameters{
+        {fixture.norm_weight, fixture.norm_bias},
+        {
+            {dequantized_qkv_weight, fixture.qkv_bias},
+            {
+                dequantized_attention_output_weight,
+                fixture.attention_output_bias,
+            },
+        },
+        {fixture.norm_weight, fixture.norm_bias},
+        {
+            {dequantized_expansion_weight, fixture.expansion_bias},
+            {dequantized_projection_weight, fixture.projection_bias},
+        },
+    };
+}
+
+void test_quantized_feed_forward_matches_dequantized_reference() {
+    const QuantizedTransformerBlockFixture fixture =
+        make_quantized_transformer_block_fixture(2, 4, 6);
+    const gpt2::QuantizedFeedForwardParameters quantized_parameters{
+        {fixture.expansion_weight, fixture.expansion_scale, fixture.expansion_bias},
+        {fixture.projection_weight, fixture.projection_scale, fixture.projection_bias},
+    };
+    const gpt2::Tensor dequantized_expansion_weight =
+        dequantize(fixture.expansion_weight, fixture.expansion_scale);
+    const gpt2::Tensor dequantized_projection_weight =
+        dequantize(fixture.projection_weight, fixture.projection_scale);
+    const gpt2::FeedForwardParameters plain_parameters{
+        {dequantized_expansion_weight, fixture.expansion_bias},
+        {dequantized_projection_weight, fixture.projection_bias},
+    };
+
+    const gpt2::Tensor quantized_result =
+        gpt2::quantized_feed_forward(fixture.input, quantized_parameters);
+    const gpt2::Tensor plain_result =
+        gpt2::feed_forward(fixture.input, plain_parameters);
+
+    for (std::size_t index = 0; index < quantized_result.numel(); ++index) {
+        expect_near(
+            quantized_result.at(index),
+            plain_result.at(index),
+            1.0e-3F,
+            "quantized feed-forward matches feed-forward over "
+            "explicitly dequantized weights"
+        );
+    }
+}
+
+void test_quantized_transformer_block_matches_dequantized_reference() {
+    const QuantizedTransformerBlockFixture fixture =
+        make_quantized_transformer_block_fixture(3, 4, 6);
+    const gpt2::QuantizedTransformerBlockParameters quantized_parameters =
+        as_quantized_parameters(fixture);
+
+    gpt2::Tensor dequantized_qkv_weight({1});
+    gpt2::Tensor dequantized_attention_output_weight({1});
+    gpt2::Tensor dequantized_expansion_weight({1});
+    gpt2::Tensor dequantized_projection_weight({1});
+    const gpt2::TransformerBlockParameters plain_parameters =
+        as_dequantized_parameters(
+            fixture,
+            dequantized_qkv_weight,
+            dequantized_attention_output_weight,
+            dequantized_expansion_weight,
+            dequantized_projection_weight
+        );
+
+    const gpt2::Tensor quantized_result = gpt2::quantized_transformer_block(
+        fixture.input,
+        quantized_parameters,
+        2
+    );
+    const gpt2::Tensor plain_result =
+        gpt2::transformer_block(fixture.input, plain_parameters, 2);
+
+    expect(
+        quantized_result.shape() == plain_result.shape(),
+        "quantized transformer block matches the plain result's shape"
+    );
+    for (std::size_t index = 0; index < quantized_result.numel(); ++index) {
+        expect_near(
+            quantized_result.at(index),
+            plain_result.at(index),
+            1.0e-2F,
+            "quantized transformer block matches transformer_block "
+            "over explicitly dequantized weights"
+        );
+    }
+}
+
+void test_quantized_transformer_block_cached_matches_uncached() {
+    const QuantizedTransformerBlockFixture fixture =
+        make_quantized_transformer_block_fixture(4, 4, 6);
+    const gpt2::QuantizedTransformerBlockParameters parameters =
+        as_quantized_parameters(fixture);
+    const std::size_t sequence_length = fixture.input.shape()[0];
+    const std::size_t embedding_size = fixture.input.shape()[1];
+
+    const gpt2::Tensor uncached =
+        gpt2::quantized_transformer_block(fixture.input, parameters, 2);
+
+    gpt2::AttentionCache cache(sequence_length, embedding_size);
+    gpt2::Tensor cached_result({sequence_length, embedding_size});
+    for (std::size_t position = 0; position < sequence_length; ++position) {
+        gpt2::Tensor step({1, embedding_size});
+        for (std::size_t feature = 0; feature < embedding_size; ++feature) {
+            const std::array<std::size_t, 2> step_index{0, feature};
+            const std::array<std::size_t, 2> source_index{
+                position, feature
+            };
+            step.at(step_index) = fixture.input.at(source_index);
+        }
+
+        const gpt2::Tensor step_result = gpt2::quantized_transformer_block(
+            step,
+            parameters,
+            2,
+            cache
+        );
+
+        for (std::size_t feature = 0; feature < embedding_size; ++feature) {
+            const std::array<std::size_t, 2> destination_index{
+                position, feature
+            };
+            cached_result.at(destination_index) =
+                step_result.at(std::array<std::size_t, 2>{0, feature});
+        }
+    }
+
+    for (std::size_t index = 0; index < uncached.numel(); ++index) {
+        expect(
+            uncached.at(index) == cached_result.at(index),
+            "quantized transformer block's cached, one-token-at-a-time "
+            "path reproduces the uncached result exactly"
+        );
+    }
+}
+
+void test_quantized_transformer_block_rejects_invalid_input() {
+    const gpt2::Tensor input({2});
+    const gpt2::Tensor vector({2});
+    const gpt2::Int8Tensor qkv_weight(
+        {2, 6},
+        make_deterministic_int8_values(12, 20)
+    );
+    const gpt2::Tensor qkv_scale(
+        {6},
+        make_deterministic_scale_values(6, 21)
+    );
+    const gpt2::Int8Tensor matrix(
+        {2, 2},
+        make_deterministic_int8_values(4, 22)
+    );
+    const gpt2::Int8Tensor expansion_weight(
+        {2, 4},
+        make_deterministic_int8_values(8, 23)
+    );
+    const gpt2::Tensor expansion_scale(
+        {4},
+        make_deterministic_scale_values(4, 24)
+    );
+    const gpt2::Int8Tensor projection_weight(
+        {4, 2},
+        make_deterministic_int8_values(8, 25)
+    );
+    const gpt2::QuantizedTransformerBlockParameters parameters{
+        {vector, vector},
+        {
+            {qkv_weight, qkv_scale, vector},
+            {matrix, vector, vector},
+        },
+        {vector, vector},
+        {
+            {expansion_weight, expansion_scale, vector},
+            {projection_weight, vector, vector},
+        },
+    };
+
+    expect_throws<std::invalid_argument>(
+        [&] {
+            static_cast<void>(
+                gpt2::quantized_transformer_block(input, parameters, 1)
+            );
+        },
+        "quantized transformer block rejects a non-matrix input"
+    );
+}
+
 }  // namespace
 
 int main() {
@@ -341,6 +736,10 @@ int main() {
     test_zero_sublayers_preserve_residual();
     test_transformer_block_matches_hugging_face_reference();
     test_transformer_block_rejects_invalid_input();
+    test_quantized_feed_forward_matches_dequantized_reference();
+    test_quantized_transformer_block_matches_dequantized_reference();
+    test_quantized_transformer_block_cached_matches_uncached();
+    test_quantized_transformer_block_rejects_invalid_input();
 
     if (failure_count != 0) {
         std::cerr << failure_count << " transformer test assertion(s) failed\n";
