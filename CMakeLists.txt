@@ -124,6 +124,15 @@ if(GPT2_BUILD_BENCHMARKS)
         GPT2_BENCHMARK_BUILD_TYPE="$<CONFIG>"
     )
     gpt2_enable_warnings(gpt2_generation_benchmark)
+
+    add_executable(gpt2_quantization_accuracy_runner
+        benchmarks/quantization_accuracy_runner.cpp
+    )
+
+    target_link_libraries(gpt2_quantization_accuracy_runner
+        PRIVATE gpt2_core
+    )
+    gpt2_enable_warnings(gpt2_quantization_accuracy_runner)
 endif()
 
 include(CTest)
@@ -281,6 +290,27 @@ if(BUILD_TESTING)
                 "--help"
         )
         set_tests_properties(record_baseline_smoke PROPERTIES
+            LABELS smoke
+            PASS_REGULAR_EXPRESSION "usage:"
+        )
+
+        add_test(
+            NAME quantization_accuracy_runner_smoke
+            COMMAND gpt2_quantization_accuracy_runner --help
+        )
+        set_tests_properties(quantization_accuracy_runner_smoke PROPERTIES
+            LABELS smoke
+            PASS_REGULAR_EXPRESSION "Usage:"
+        )
+
+        add_test(
+            NAME benchmark_quantization_smoke
+            COMMAND
+                "${Python3_EXECUTABLE}"
+                "${PROJECT_SOURCE_DIR}/tools/benchmark_quantization.py"
+                "--help"
+        )
+        set_tests_properties(benchmark_quantization_smoke PROPERTIES
             LABELS smoke
             PASS_REGULAR_EXPRESSION "usage:"
         )

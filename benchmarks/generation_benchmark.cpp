@@ -22,6 +22,10 @@
 #include <utility>
 #include <vector>
 
+#if defined(__APPLE__) || defined(__linux__)
+#include <sys/resource.h>
+#endif
+
 #ifndef GPT2_BENCHMARK_BUILD_TYPE
 #define GPT2_BENCHMARK_BUILD_TYPE "unknown"
 #endif
@@ -58,6 +62,7 @@ struct Results {
     std::vector<double> uncached_trials;
     double cached_median;
     double uncached_median;
+    std::optional<std::uintmax_t> peak_resident_set_bytes;
 };
 
 void print_help(std::ostream& output) {
@@ -329,6 +334,31 @@ std::string_view architecture_name() {
 #endif
 }
 
+// The whole process's peak resident set size, sampled after all
+// warmup and measured trials have run (both the cached and uncached
+// paths, which this benchmark always exercises together). The OS
+// maintains this peak over the entire process lifetime, so this is
+// the worst-case footprint over the run, not an isolated reading of
+// whichever path happened to run last.
+// std::nullopt on a platform this has no portable reading for.
+std::optional<std::uintmax_t> peak_resident_set_bytes() {
+#if defined(__APPLE__) || defined(__linux__)
+    struct rusage usage {};
+    if (getrusage(RUSAGE_SELF, &usage) != 0) {
+        return std::nullopt;
+    }
+#if defined(__APPLE__)
+    // macOS reports ru_maxrss in bytes.
+    return static_cast<std::uintmax_t>(usage.ru_maxrss);
+#else
+    // Linux reports ru_maxrss in kibibytes.
+    return static_cast<std::uintmax_t>(usage.ru_maxrss) * 1024U;
+#endif
+#else
+    return std::nullopt;
+#endif
+}
+
 std::string json_escape(std::string_view text) {
     std::string escaped;
     for (const char character : text) {
@@ -442,7 +472,14 @@ void write_json(
            << generated / results.uncached_median << ",\n"
            << "    \"cache_speedup\": "
            << results.uncached_median / results.cached_median << ",\n"
-           << "    \"tokens_agree\": true\n"
+           << "    \"tokens_agree\": true,\n"
+           << "    \"peak_resident_set_bytes\": ";
+    if (results.peak_resident_set_bytes.has_value()) {
+        output << *results.peak_resident_set_bytes;
+    } else {
+        output << "null";
+    }
+    output << "\n"
            << "  }\n"
            << "}\n";
 }
@@ -478,7 +515,13 @@ void print_results(
            << generated / results.uncached_median << " tokens/s)\n"
            << "cache speedup: "
            << results.uncached_median / results.cached_median << "x\n"
-           << "tokens agree: yes\n";
+           << "tokens agree: yes\n"
+           << "peak resident set size: ";
+    if (results.peak_resident_set_bytes.has_value()) {
+        output << *results.peak_resident_set_bytes << " bytes\n";
+    } else {
+        output << "not available on this platform\n";
+    }
 }
 
 Results benchmark(const Options& options, std::ostream& progress) {
@@ -550,6 +593,7 @@ Results benchmark(const Options& options, std::ostream& progress) {
         uncached_trials,
         median(cached_trials),
         median(uncached_trials),
+        peak_resident_set_bytes(),
     };
 }
 

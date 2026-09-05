@@ -195,31 +195,113 @@ benchmark (mean/maximum logit error, top-1/top-5 agreement, runtime
 memory, tokens per second, optionally perplexity, all over a real
 evaluation set) is the next step; see [Benchmarking](benchmarks.md).
 
-## Real GPT-2 Small checkpoint sizes
+## Benchmark result
 
 Measured against the same pinned revision used throughout this project
 (`607a30d783dfa663caf39e06633721c8d4cfcd7e`; see
-[Numerical Validation](numerical-validation.md)):
+[Numerical Validation](numerical-validation.md)), with
+`tools/benchmark_quantization.py`, which runs
+`gpt2_quantization_accuracy_runner` (accuracy, over a real evaluation
+text) and `gpt2_generation_benchmark` (speed and peak memory, over the
+same synthetic-prompt workload [the generation baseline](benchmarks.md#baseline-result)
+uses) against all three real checkpoints and combines their results
+with the same CPU/OS provenance `tools/record_baseline.py` adds to the
+plain generation benchmark:
 
-```text
-config 1 - FP32 baseline:              497,770,048 bytes (100.0%)
-config 2 - int8 transformer, FP32 wte: 243,301,944 bytes  (48.9%)
-config 3 - int8 transformer and wte:   127,710,918 bytes  (25.7%)
+```bash
+.venv/bin/python tools/benchmark_quantization.py \
+  --accuracy-runner build-benchmark/gpt2_quantization_accuracy_runner \
+  --generation-benchmark build-benchmark/gpt2_generation_benchmark \
+  --vocab "$HF_SNAPSHOT/vocab.json" \
+  --merges "$HF_SNAPSHOT/merges.txt" \
+  --text benchmarks/quantization_eval_corpus.txt \
+  --fp32-checkpoint models/gpt2-small-fp32.bin \
+  --int8-transformer-checkpoint models/gpt2-small-int8-transformer.bin \
+  --int8-full-checkpoint models/gpt2-small-int8-full.bin \
+  --output benchmarks/results/quantization-benchmark.json \
+  --warmups 2 --trials 5
 ```
 
-`wte` alone accounts for about 38.6 million of GPT-2 Small's 124.4
-million parameters — nearly a third of the model — which is why config
-3 is roughly another 2x smaller than config 2 rather than a marginal
-improvement on it. `parameter_count` in `ExportSummary` is identical
-across all three exports (124,439,808): quantizing changes how a
-weight is stored, never what model it represents, and a per-channel
-scale is quantization metadata rather than a model parameter, so it is
-excluded from that count.
+### Reproducibility controls
 
-Accuracy (mean and maximum logit error, top-1 and top-5 agreement
-against the FP32 baseline) and runtime speed and memory are measured
-formally as their own benchmark — see [Benchmarking](benchmarks.md) —
-though a small real-model spot check already appears above.
+- Checkpoints: `models/gpt2-small-fp32.bin`,
+  `models/gpt2-small-int8-transformer.bin`,
+  `models/gpt2-small-int8-full.bin` (each one's SHA-256 is recorded in
+  the committed result JSON below)
+- CPU: Apple M3
+- OS: macOS 15.7.4 (24G517)
+- Evaluation text:
+  [`benchmarks/quantization_eval_corpus.txt`](../benchmarks/quantization_eval_corpus.txt),
+  658 tokens of original English prose written for this benchmark --
+  real, coherent text, not synthetic or hand-picked token IDs, since a
+  language model's activation statistics on real text are not what
+  they are on arbitrary token sequences
+- Speed workload: the same 8-token-prompt-extended-by-24-tokens
+  workload as the generation baseline, 2 unmeasured warm-up pairs, 5
+  measured pairs
+
+### Result
+
+| | config 1 (FP32) | config 2 (int8 transformer) | config 3 (int8 transformer + wte) |
+| --- | ---: | ---: | ---: |
+| checkpoint size | 497,770,048 B (100.0%) | 243,301,944 B (48.9%) | 127,710,918 B (25.7%) |
+| peak resident set size | 631,980,032 B (100.0%) | 363,986,944 B (57.6%) | 282,755,072 B (44.7%) |
+| cached tokens/s | 7.58 | 7.48 | 7.31 |
+| uncached tokens/s | 0.63 | 0.60 | 0.59 |
+| perplexity (658-token eval text) | 27.39 | 27.43 | 28.22 |
+| mean \|logit error\| vs FP32 | — | 0.516 | 0.601 |
+| max \|logit error\| vs FP32 | — | 10.87 | 10.85 |
+| top-1 agreement vs FP32 | — | 98.02% | 80.40% |
+| top-5 agreement vs FP32 | — | 100.00% | 99.09% |
+
+Every per-config detail above (all three checkpoints' SHA-256, the
+reported tokens-per-second figures, and the full provenance) is committed at
+[`benchmarks/results/quantization-benchmark.json`](../benchmarks/results/quantization-benchmark.json).
+"Top-5 agreement" here means the FP32 baseline's own top-1 token still
+appears somewhere in the quantized model's top 5 -- not that the two
+top-5 *sets* match exactly, which real quantization noise would make a
+far harsher and less meaningful bar, since which token lands exactly
+5th is inherently unstable.
+
+### Interpreting the result
+
+**Speed did not improve, and both quantized configs are a little
+slower than FP32.** Config 2 is about 1.3% slower cached and 4.9%
+slower uncached; config 3 -- with the extra dequantize work of a
+quantized `wte`, read on both the embedding lookup and the tied
+LM-head projection -- is about 3.5% slower cached and 6.2% slower
+uncached. This is exactly what
+[not assuming compression implies speed](#why-weights-only-and-why-measure-speed-rather-than-assume-it)
+predicted: every quantized weight here is dequantized inline, on every
+use, inside the existing FP32 inner loop -- strictly *more* arithmetic
+per multiply-add than reading an FP32 weight directly, so without a
+real int8 kernel there is no mechanism by which this could be faster.
+
+**Memory dropped substantially, tracking checkpoint size but not
+matching it exactly.** Peak resident set size fell 42.4% (config 2)
+and 55.3% (config 3) against checkpoint-size reductions of 51.1% and
+74.3%. RSS also covers activation buffers, the KV cache, and the
+runtime's own baseline footprint, none of which shrink with
+quantization, so the relative memory saving is real but smaller than
+the relative checkpoint-size saving.
+
+**Accuracy degrades gracefully for config 2, more noticeably for
+config 3.** Over 657 real next-token predictions, config 2
+(transformer weights only) still picks the FP32 baseline's exact top
+token 98% of the time, and its top-5 always contains that token.
+Config 3 additionally quantizes `wte` -- about 38.6 million of GPT-2
+Small's 124.4 million parameters, nearly a third of the model, read
+directly for both the input embedding and the final vocabulary
+projection -- and its top-1 agreement falls to 80%, with perplexity
+rising about 3% over the FP32 baseline (27.39 to 28.22) against a
+negligible rise for config 2 (27.39 to 27.43). This is the same
+tensor that makes config 3's checkpoint roughly another 2x smaller
+than config 2's rather than a marginal improvement on it:
+`parameter_count` in `ExportSummary` is identical across all three
+exports (124,439,808) since quantizing changes how a weight is stored,
+never what model it represents, but `wte`'s share of that storage is
+what config 3 spends its extra compression on, and its accuracy cost
+is concentrated in the same place.
 
 ## Testing
 

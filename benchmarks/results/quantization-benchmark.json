@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "cpu_model": "Apple M3",
+    "os_version": "macOS 15.7.4 (24G517)",
+    "recorded_at": "2026-09-05T03:07:39Z"
+  },
+  "evaluation_text": "benchmarks/quantization_eval_corpus.txt",
+  "evaluation_token_count": 658,
+  "configs": {
+    "fp32": {
+      "checkpoint_path": "models/gpt2-small-fp32.bin",
+      "checkpoint_bytes": 497770048,
+      "checkpoint_sha256": "c506385a3b29873ef9148a8a5b672b66711a01c2180865ae46449f74cac0d6dc",
+      "tokens_per_second": {
+        "cached": 7.58221201031936,
+        "uncached": 0.6322988424798187
+      },
+      "peak_resident_set_bytes": 631980032,
+      "perplexity": 27.394211455659693
+    },
+    "int8_transformer": {
+      "checkpoint_path": "models/gpt2-small-int8-transformer.bin",
+      "checkpoint_bytes": 243301944,
+      "checkpoint_sha256": "633940095aed115a8249fa8e67566a2d79772ba60a74ff37ba15413185a7e645",
+      "tokens_per_second": {
+        "cached": 7.480940259120288,
+        "uncached": 0.6013601539004474
+      },
+      "peak_resident_set_bytes": 363986944,
+      "perplexity": 27.432711218590946,
+      "vs_fp32": {
+        "mean_absolute_logit_error": 0.5156333115817386,
+        "max_absolute_logit_error": 10.867589950561523,
+        "top1_agreement": 0.9802431610942249,
+        "top5_agreement": 1.0
+      }
+    },
+    "int8_full": {
+      "checkpoint_path": "models/gpt2-small-int8-full.bin",
+      "checkpoint_bytes": 127710918,
+      "checkpoint_sha256": "c368c104cbef92bfe2c94aaf94b980c83bacc2126d2a4c03e6c072e4d389a280",
+      "tokens_per_second": {
+        "cached": 7.314277076472786,
+        "uncached": 0.5934051143769505
+      },
+      "peak_resident_set_bytes": 282755072,
+      "perplexity": 28.224939693908688,
+      "vs_fp32": {
+        "mean_absolute_logit_error": 0.6011035585737893,
+        "max_absolute_logit_error": 10.850410461425781,
+        "top1_agreement": 0.8039513677811551,
+        "top5_agreement": 0.9908814589665653
+      }
+    }
+  }
+}
