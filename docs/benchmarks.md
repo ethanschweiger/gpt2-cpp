@@ -141,3 +141,7 @@ The speedup applies to the specified workload and machine, not to every
 prompt length or processor. Cached decoding still attends over all prior
 tokens, so its work grows with context length; it avoids recomputing the
 earlier tokens' projections and MLP layers.
+
+[Profiling](profiling.md) breaks down where this run's time actually
+went, both cached and uncached, and names the concrete target for the
+next optimization pass.
