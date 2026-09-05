@@ -4,6 +4,7 @@
 #include "gpt2/tensor_ops.h"
 #include "gpt2/transformer.h"
 
+#include <algorithm>
 #include <atomic>
 #include <limits>
 #include <numeric>
@@ -282,6 +283,25 @@ Tensor tied_embedding_logits(
     return logits;
 }
 
+// Copies out the final row of a [sequence length, embedding size]
+// hidden state as its own [1, embedding size] tensor. Generation never
+// reads any row of forward's logits but the last one, so tied_
+// embedding_logits is given only that row rather than the whole
+// sequence; see docs/profiling.md.
+Tensor extract_last_row(const Tensor& hidden_state) {
+    const std::size_t sequence_length = hidden_state.shape()[0];
+    const std::size_t embedding_size = hidden_state.shape()[1];
+
+    Tensor last_row({1, embedding_size});
+    std::copy_n(
+        hidden_state.data() + (sequence_length - 1) * embedding_size,
+        embedding_size,
+        last_row.data()
+    );
+
+    return last_row;
+}
+
 }  // namespace
 
 Gpt2Model::Gpt2Model(Checkpoint checkpoint)
@@ -346,7 +366,7 @@ void KvCache::clear() {
     owner_id_m = 0;
 }
 
-Tensor Gpt2Model::forward(
+Tensor Gpt2Model::run_transformer_stack(
     std::span<const std::size_t> token_ids
 ) const {
     const std::size_t context_length =
@@ -382,21 +402,38 @@ Tensor Gpt2Model::forward(
         );
     }
 
-    hidden_state = layer_norm(
+    return layer_norm(
         hidden_state,
         checkpoint_m.tensor("transformer.ln_f.weight"),
         checkpoint_m.tensor("transformer.ln_f.bias")
     );
+}
 
+Tensor Gpt2Model::forward(
+    std::span<const std::size_t> token_ids
+) const {
     return tied_embedding_logits(
-        hidden_state,
+        run_transformer_stack(token_ids),
         checkpoint_m.tensor("transformer.wte.weight")
     );
 }
 
-Tensor Gpt2Model::forward(
+Tensor Gpt2Model::forward_last_token_logits(
+    std::span<const std::size_t> token_ids
+) const {
+    return tied_embedding_logits(
+        extract_last_row(run_transformer_stack(token_ids)),
+        checkpoint_m.tensor("transformer.wte.weight")
+    );
+}
+
+// Runs every transformer layer, mutating cache in place, and returns
+// the final (post layer_norm) hidden state for token_ids. Does not
+// Throws before touching cache.layers_m in any way, so a rejected call
+// never needs a rollback — see run_cached_transformer_stack below.
+std::size_t Gpt2Model::validate_cached_forward(
     std::span<const std::size_t> token_ids,
-    KvCache& cache
+    const KvCache& cache
 ) const {
     const std::size_t layer_count =
         static_cast<std::size_t>(config().layer_count);
@@ -428,10 +465,29 @@ Tensor Gpt2Model::forward(
     }
     validate_token_sequence(token_ids, context_length - start);
 
-    // The cached tokens already occupy positions 0 through start - 1,
-    // so the new tokens continue from there.
+    return start;
+}
+
+// Runs every transformer layer, mutating cache in place, and returns
+// the final (post layer_norm) hidden state for token_ids. The caller
+// must have already validated the call with validate_cached_forward
+// and pass its result as sequence_start; if this throws partway
+// through, cache.layers_m may hold a mix of updated and un-updated
+// lengths, and the caller is expected to roll every layer back to
+// sequence_start.
+Tensor Gpt2Model::run_cached_transformer_stack(
+    std::span<const std::size_t> token_ids,
+    KvCache& cache,
+    std::size_t sequence_start
+) const {
+    // The cached tokens already occupy positions 0 through
+    // sequence_start - 1, so the new tokens continue from there.
     std::vector<std::size_t> position_ids(token_ids.size());
-    std::iota(position_ids.begin(), position_ids.end(), start);
+    std::iota(
+        position_ids.begin(),
+        position_ids.end(),
+        sequence_start
+    );
 
     const Tensor token_state = embedding_lookup(
         checkpoint_m.tensor("transformer.wte.weight"),
@@ -443,30 +499,60 @@ Tensor Gpt2Model::forward(
     );
     Tensor hidden_state = add(token_state, position_state);
 
+    const std::size_t layer_count =
+        static_cast<std::size_t>(config().layer_count);
     const std::size_t head_count =
         static_cast<std::size_t>(config().head_count);
 
-    try {
-        for (std::size_t layer = 0; layer < layer_count; ++layer) {
-            const TransformerBlockParameters parameters =
-                bind_block(checkpoint_m, layer);
+    for (std::size_t layer = 0; layer < layer_count; ++layer) {
+        const TransformerBlockParameters parameters =
+            bind_block(checkpoint_m, layer);
 
-            hidden_state = transformer_block(
-                hidden_state,
-                parameters,
-                head_count,
-                cache.layers_m[layer]
-            );
-        }
-
-        hidden_state = layer_norm(
+        hidden_state = transformer_block(
             hidden_state,
-            checkpoint_m.tensor("transformer.ln_f.weight"),
-            checkpoint_m.tensor("transformer.ln_f.bias")
+            parameters,
+            head_count,
+            cache.layers_m[layer]
         );
+    }
 
+    return layer_norm(
+        hidden_state,
+        checkpoint_m.tensor("transformer.ln_f.weight"),
+        checkpoint_m.tensor("transformer.ln_f.bias")
+    );
+}
+
+Tensor Gpt2Model::forward(
+    std::span<const std::size_t> token_ids,
+    KvCache& cache
+) const {
+    const std::size_t start = validate_cached_forward(token_ids, cache);
+    try {
         Tensor logits = tied_embedding_logits(
-            hidden_state,
+            run_cached_transformer_stack(token_ids, cache, start),
+            checkpoint_m.tensor("transformer.wte.weight")
+        );
+        cache.owner_id_m = identity_m;
+        return logits;
+    } catch (...) {
+        for (AttentionCache& layer : cache.layers_m) {
+            layer.length_m = start;
+        }
+        throw;
+    }
+}
+
+Tensor Gpt2Model::forward_last_token_logits(
+    std::span<const std::size_t> token_ids,
+    KvCache& cache
+) const {
+    const std::size_t start = validate_cached_forward(token_ids, cache);
+    try {
+        Tensor logits = tied_embedding_logits(
+            extract_last_row(
+                run_cached_transformer_stack(token_ids, cache, start)
+            ),
             checkpoint_m.tensor("transformer.wte.weight")
         );
         cache.owner_id_m = identity_m;

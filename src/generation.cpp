@@ -312,9 +312,12 @@ Generation run_generation(
             return generation;
         }
 
+        // Only the final row of forward's logits is ever used below,
+        // so forward_last_token_logits is asked to project only that
+        // row rather than the whole sequence; see docs/profiling.md.
         const Tensor logits = cache.has_value()
-            ? model.forward(pending, *cache)
-            : model.forward(sequence);
+            ? model.forward_last_token_logits(pending, *cache)
+            : model.forward_last_token_logits(sequence);
         const std::size_t next_token = choose_token(last_row(logits));
 
         if (cache.has_value()) {

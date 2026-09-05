@@ -98,22 +98,36 @@ JSON with the checkpoint's SHA-256 and the machine it ran on:
 ### Result
 
 ```text
-cached median:      3.326 s  (7.22 tokens/s)
-uncached median:    48.389 s (0.50 tokens/s)
-cache speedup:      14.55x
+cached median:      3.223 s  (7.45 tokens/s)
+uncached median:    38.714 s (0.62 tokens/s)
+cache speedup:      12.01x
 generated tokens agree between paths: yes (all 7 pairs)
 ```
 
-Every measured trial is within 3% of its path's median — 3.26–3.51 s cached,
-48.17–49.72 s uncached — so the speedup is not an artifact of one lucky run.
-The raw per-trial timings, full environment, and checkpoint SHA-256 are
-committed at
+Every measured trial is within 1.2% of its path's median — 3.20–3.24 s
+cached, 38.66–39.11 s uncached — so this is not an artifact of one lucky
+run. The raw per-trial timings, full environment, and checkpoint SHA-256
+are committed at
 [`benchmarks/results/gpt2-small-release.json`](../benchmarks/results/gpt2-small-release.json).
 
 This machine and workload only: a longer prompt or a different processor
 will change both numbers, though the growing gap between them as context
 length increases is architectural (see
 [Interpreting the result](#interpreting-the-result)), not specific to this run.
+
+This replaces an earlier baseline (cached 3.326 s, uncached 48.389 s,
+speedup 14.55x) recorded before
+[the last-token-only projection](generation.md#the-last-token-only-projection)
+existed. That change cut the uncached median by 20% — it recomputes the
+whole sequence at every step, so avoiding wasted projection work at
+every one of those steps compounds — while the cached path, which is
+already just one new token per step, only benefited on its single
+prefill call and moved by about 3%, within the run's own noise. The
+speedup ratio *falling* from 14.55x to 12.01x reflects that directly:
+the reference path got faster and the one users actually run barely
+changed, so the gap between them narrowed. A shrinking ratio here is
+what a targeted fix to the slower path is supposed to do — it is not a
+regression in the cached path, which is what to check instead.
 
 ## JSON output
 

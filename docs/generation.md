@@ -172,6 +172,32 @@ That step still attends over all earlier keys, so its attention work
 grows linearly with the cached context, but it no longer reprojects or
 runs the MLP for every earlier token.
 
+### The last-token-only projection
+
+`generate_greedy` and `generate_sampled` never read any row of a
+forward pass's logits but the last one — see `last_row` in
+[generation.cpp](../src/generation.cpp). [Profiling](profiling.md) found
+that projecting every other position onto the 50,257-word vocabulary
+anyway was pure waste, worth roughly 30% of a step's cost at the
+uncached path's longest sequence lengths. `Gpt2Model` exposes that
+narrower operation directly:
+
+```cpp
+const gpt2::Tensor last_logits =
+    model.forward_last_token_logits(token_ids);       // [1, vocabulary size]
+const gpt2::Tensor last_logits_cached =
+    model.forward_last_token_logits(token_ids, cache); // same, with a cache
+```
+
+Both generation functions use this instead of `forward`. It shares
+every layer of computation with `forward` — the same embeddings, the
+same transformer blocks, the same cache mutation — and differs only in
+which row the final tied projection computes, so its last row is
+bit-identical to `forward`'s. `forward` itself is unchanged and still
+returns every position's logits: the model unit test and the
+201,028-logit Hugging Face parity test both depend on that, since
+neither only wants the final position.
+
 ### Cost
 
 `benchmarks/generation_benchmark.cpp` measures both paths with warm-ups,

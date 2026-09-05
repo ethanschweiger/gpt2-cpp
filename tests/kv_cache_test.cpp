@@ -201,6 +201,133 @@ void test_mixed_chunk_sizes_match_uncached() {
     );
 }
 
+// forward_last_token_logits exists purely as an optimization for
+// generation: it must return exactly the row forward() would have
+// returned for the same final token, never a different one, in both
+// the cached and uncached cases and across every sequence length that
+// generation actually produces (a multi-token prefill, a single-token
+// step, and a sequence already at the context window).
+void test_last_token_logits_matches_forwards_last_row() {
+    const gpt2::Gpt2Model model = load_fixture_model();
+    const std::array<std::size_t, 4> tokens{2, 5, 1, 3};
+
+    const gpt2::Tensor uncached_full = model.forward(tokens);
+    const gpt2::Tensor uncached_last =
+        model.forward_last_token_logits(tokens);
+
+    expect(
+        uncached_last.shape() == gpt2::Tensor::Shape{1, 7},
+        "the uncached last-token overload returns a single row"
+    );
+    expect_identical_bits(
+        all_of(uncached_last),
+        row_of(uncached_full, tokens.size() - 1),
+        "the uncached last-token overload reproduces forward()'s "
+        "final row exactly"
+    );
+
+    gpt2::KvCache prefill_cache(model.config());
+    const gpt2::Tensor cached_full = model.forward(tokens, prefill_cache);
+
+    gpt2::KvCache prefill_cache_again(model.config());
+    const gpt2::Tensor cached_last =
+        model.forward_last_token_logits(tokens, prefill_cache_again);
+
+    expect(
+        cached_last.shape() == gpt2::Tensor::Shape{1, 7},
+        "the cached last-token overload returns a single row for a "
+        "multi-token prefill"
+    );
+    expect_identical_bits(
+        all_of(cached_last),
+        row_of(cached_full, tokens.size() - 1),
+        "the cached last-token overload reproduces the prefill's "
+        "final row exactly"
+    );
+    expect(
+        prefill_cache_again.length() == prefill_cache.length(),
+        "the last-token overload still advances the cache normally"
+    );
+
+    // A single-token step is already the "last row" case for the
+    // ordinary cached forward(), so the two overloads should agree
+    // step for step over a whole generation-style run.
+    gpt2::KvCache stepped_cache(model.config());
+    gpt2::KvCache stepped_cache_last(model.config());
+    for (const std::size_t token : tokens) {
+        const std::array<std::size_t, 1> step{token};
+        const gpt2::Tensor full_step =
+            model.forward(step, stepped_cache);
+        const gpt2::Tensor last_step =
+            model.forward_last_token_logits(step, stepped_cache_last);
+
+        expect_identical_bits(
+            all_of(last_step),
+            all_of(full_step),
+            "single-token steps agree between both overloads"
+        );
+    }
+
+    // At the context window's edge there is exactly one row either
+    // way, which should not be treated differently from any other
+    // sequence length.
+    const std::array<std::size_t, 5> full_context{0, 1, 2, 3, 4};
+    const gpt2::Tensor edge_full = model.forward(full_context);
+    const gpt2::Tensor edge_last =
+        model.forward_last_token_logits(full_context);
+    expect_identical_bits(
+        all_of(edge_last),
+        row_of(edge_full, full_context.size() - 1),
+        "a sequence at the context window still matches exactly"
+    );
+}
+
+// A cache used only through forward_last_token_logits must reject and
+// roll back exactly as forward() does, since generation relies on
+// being able to retry after a rejected call.
+void test_last_token_logits_shares_forwards_validation() {
+    const gpt2::Gpt2Model model = load_fixture_model();
+
+    const std::span<const std::size_t> empty;
+    expect_throws<std::invalid_argument>(
+        [&model, empty] {
+            static_cast<void>(model.forward_last_token_logits(empty));
+        },
+        "the uncached last-token overload rejects an empty sequence"
+    );
+
+    const std::array<std::size_t, 1> invalid_token{7};
+    expect_throws<std::out_of_range>(
+        [&model, &invalid_token] {
+            static_cast<void>(
+                model.forward_last_token_logits(invalid_token)
+            );
+        },
+        "the uncached last-token overload rejects an out-of-range token"
+    );
+
+    gpt2::KvCache cache(model.config());
+    const std::array<std::size_t, 5> full_context{0, 1, 2, 3, 4};
+    static_cast<void>(
+        model.forward_last_token_logits(full_context, cache)
+    );
+
+    const std::array<std::size_t, 1> one_more{1};
+    expect_throws<std::invalid_argument>(
+        [&model, &cache, &one_more] {
+            static_cast<void>(
+                model.forward_last_token_logits(one_more, cache)
+            );
+        },
+        "a full cache still rejects another token through the "
+        "last-token overload"
+    );
+    expect(
+        cache.length() == fixture_context_length,
+        "a rejected call leaves the cache exactly as full as before"
+    );
+}
+
 void test_cleared_cache_can_be_reused() {
     const gpt2::Gpt2Model model = load_fixture_model();
     const std::array<std::size_t, 3> first{2, 5, 1};
@@ -283,6 +410,10 @@ void test_cache_rejects_invalid_use() {
         },
         "a full cache rejects another token"
     );
+    expect(
+        cache.length() == fixture_context_length,
+        "a rejected call leaves the cache exactly as full as before"
+    );
 
     gpt2::KvCache empty_cache(model.config());
     const std::span<const std::size_t> empty;
@@ -331,6 +462,8 @@ int main() {
         test_cached_forward_matches_uncached();
         test_one_token_at_a_time_matches_uncached();
         test_mixed_chunk_sizes_match_uncached();
+        test_last_token_logits_matches_forwards_last_row();
+        test_last_token_logits_shares_forwards_validation();
         test_cleared_cache_can_be_reused();
         test_cache_reports_its_shape();
         test_populated_cache_is_bound_to_its_model();

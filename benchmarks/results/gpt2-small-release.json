@@ -33,36 +33,36 @@
     "trials": 7
   },
   "results": {
-    "checkpoint_load_seconds": 0.200747916,
+    "checkpoint_load_seconds": 0.197677417,
     "cached_trial_seconds": [
-      3.256918709,
-      3.508044042,
-      3.322468666,
-      3.35203275,
-      3.334843042,
-      3.317751959,
-      3.326104583
+      3.235535666,
+      3.225588791,
+      3.218543041,
+      3.215504166,
+      3.227801708,
+      3.222698583,
+      3.204019375
     ],
     "uncached_trial_seconds": [
-      48.692682291,
-      48.199105,
-      49.717841583,
-      48.389396958,
-      48.375398834,
-      48.165997041,
-      48.614381333
+      38.655884459,
+      38.704806458,
+      38.715429084,
+      38.655639,
+      38.856910458,
+      38.714238542,
+      39.114664625
     ],
-    "cached_median_seconds": 3.326104583,
-    "uncached_median_seconds": 48.389396958,
-    "cached_tokens_per_second": 7.215648035442427,
-    "uncached_tokens_per_second": 0.4959764227033251,
-    "cache_speedup": 14.548369045676518,
+    "cached_median_seconds": 3.222698583,
+    "uncached_median_seconds": 38.714238542,
+    "cached_tokens_per_second": 7.447174900749941,
+    "uncached_tokens_per_second": 0.6199269546258303,
+    "cache_speedup": 12.012987732151181,
     "tokens_agree": true
   },
   "provenance": {
     "checkpoint_sha256": "c506385a3b29873ef9148a8a5b672b66711a01c2180865ae46449f74cac0d6dc",
     "cpu_model": "Apple M3",
     "os_version": "macOS 15.7.4 (24G517)",
-    "recorded_at": "2026-09-04T23:21:03Z"
+    "recorded_at": "2026-09-05T00:37:28Z"
   }
 }
